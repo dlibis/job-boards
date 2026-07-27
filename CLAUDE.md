@@ -28,13 +28,29 @@ run. Both print `ok` on success.
 
 ## Do not run casually
 
-`--refresh-boards` and `--all` are live network operations across ~12,000 boards on
-three platforms. Never in a loop. Everything you need to verify a code change is
-covered by the offline suite. `--limit 10` plus `--ats <one>` is the cheap way to
-exercise a real request path.
+`--refresh-boards` and `--all` are live network operations across 13,132 boards on three
+platforms, taking ~26 minutes. Never in a loop. Everything you need to verify a code
+change is covered by the offline suite. `--limit 10` plus `--ats <one>` is the cheap way
+to exercise a real request path.
+
+`--refresh-recent` is the cheap discovery pass (~4 minutes) and `--since 7d` narrows to
+recent postings — still live network calls, so the same rules apply.
 
 `--grep` on Greenhouse requests full job descriptions, which is roughly **26x** the
 bytes of a normal run. Do not add it casually to an unlimited run.
+
+## If you add a filter, update `may_close_postings()`
+
+This is the single most damaging thing to get wrong in this codebase.
+
+`closed_at` asserts a posting is gone. Only a run that saw every posting on a board may
+set it, so every narrowing flag — `--title`, `--grep`, `--since`, `--new-only` — has to be
+listed in `may_close_postings()` in `job_boards.py`. A filter missing from it means a
+perfectly normal-looking run silently marks huge numbers of live postings as closed:
+`--all --since 7d` would close everything older than a week.
+
+It is pinned by `test_only_an_unfiltered_run_may_close_postings`. Add your filter to both
+in the same change.
 
 Set `JOB_SCRAPER_CONTACT` to a real address before any network run. Ask for one;
 do not invent it.
