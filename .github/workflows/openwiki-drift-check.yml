@@ -17,11 +17,13 @@ name: OpenWiki Drift Check
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+    # Source only. The wiki documents mechanisms rather than prose or data, so
+    # README edits and seed additions cannot invalidate it — including them made
+    # the check fire on things like adding author links. Keep this list identical
+    # to the grep in the step below.
     paths:
       - "job_boards.py"
       - "test_job_boards.py"
-      - "README.md"
-      - "boards.seed.json"
 
 permissions:
   contents: read
@@ -44,7 +46,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
-          code=$(echo "$changed" | grep -E '^(job_boards\.py|test_job_boards\.py|README\.md|boards\.seed\.json)$' || true)
+          code=$(echo "$changed" | grep -E '^(job_boards\.py|test_job_boards\.py)$' || true)
           wiki=$(echo "$changed" | grep -E '^openwiki/' || true)
 
           if [ -z "$code" ]; then

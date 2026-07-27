@@ -469,7 +469,7 @@ regenerating.**
 
 | workflow | trigger | what it does |
 |---|---|---|
-| `openwiki-drift-check.yml` | a PR touching `job_boards.py`, `README.md`, tests or the seed | **fails** the PR if `openwiki/` was not updated too |
+| `openwiki-drift-check.yml` | a PR touching `job_boards.py` or the tests | **fails** the PR if `openwiki/` was not updated too |
 | `openwiki-update.yml` | manual (`workflow_dispatch`) | full refresh in CI, opens a PR — needs an API key |
 
 So the loop is:
@@ -480,8 +480,10 @@ git add openwiki AGENTS.md CLAUDE.md
 git commit -m "docs: sync OpenWiki"
 ```
 
-Put `[skip-wiki]` in the PR title to bypass the check for a change that genuinely does
-not affect the wiki.
+It watches source only. The wiki documents mechanisms rather than prose or data, so
+README edits and `boards.seed.json` additions cannot invalidate it and do not trigger the
+check. Put `[skip-wiki]` in the PR title to bypass it for a source change that genuinely
+does not affect the wiki — a comment, a rename.
 
 **Why the drift check doesn't just regenerate for you.** Regenerating needs provider
 credentials, and OpenWiki can authenticate with a ChatGPT subscription — an OAuth
