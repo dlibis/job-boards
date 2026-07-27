@@ -169,7 +169,7 @@ rather than silently ANDing the default `software engineer` onto it.
 **Use `\b`.** Without word boundaries a pattern matches inside longer words, and job
 descriptions are full of boilerplate that will catch you:
 
-| pattern | jobs matched (26 boards) |
+| pattern | jobs matched (26 Ashby boards) |
 |---|---|
 | `rust\|golang` | **1350** — `rust` matches "t**rust**", which is in nearly every description |
 | `\brust\b\|\bgolang\b` | **72** |
@@ -186,8 +186,8 @@ to 653KB gzipped — measured on `stripe`. The script requests content only when
 is set, and warns when it does. A `--grep` sweep of every Greenhouse board is multiple
 gigabytes; scope it with `--ats` or `--limit` unless you mean it.
 
-Against the shipped 26 boards, `software engineer` returns **268** jobs fuzzy and **2**
-exact — pick accordingly.
+Fuzzy is much wider than exact: on a 26-board Ashby sample, `software engineer` returned
+**268** jobs fuzzy against **2** exact, because most companies prefix with Senior/Staff.
 
 ## The database
 
@@ -303,8 +303,8 @@ Three details make that work:
   for hours at a time. The Internet Archive returned 191k URLs in 34 seconds. Common Crawl
   is still there as an automatic fallback.
 - **A shape filter before validating.** Archived "path segments" include tracking blobs,
-  compensation strings like `$10.2K`, and JS fragments. Filtering to plausible slugs cuts
-  7,463 candidates to 5,000 probes.
+  compensation strings like `$10.2K`, and JS fragments. On Ashby that cuts 7,463
+  candidates to 5,000 probes; sampling 150 of the rejects found zero real boards.
 - **HEAD, not GET.** A live board returns 200 with a zero-length body under HEAD, so
   validating 5,000 candidates costs nothing. GET would have downloaded ~220KB per live
   board — most of a gigabyte purely to learn which slugs are real.
@@ -368,8 +368,9 @@ the failure is server-side, not anything you can fix:
 Their docs explain it: the index server handles several million requests/day and sheds
 requests on **queue overflow**. Everyone hits this at the same odds.
 
-**Coverage.** Its estimate was ~3,400 candidate slugs. The Wayback Machine yielded 3,611
-*validated live* boards from a far larger URL set.
+**Coverage.** For Ashby its estimate was ~3,400 candidate slugs; the Wayback Machine
+yielded 3,617 *validated live* boards from a far larger URL set, and 13,132 across all
+three platforms.
 
 If you do fall through to it, the status codes differ in meaning. **502/504 = server
 overloaded**, retry later, nothing you did. **503 = you are going too fast**; per their
@@ -377,8 +378,8 @@ docs a repeatedly-abusive IP can be blocked for 24 hours, so the script raises a
 error with that guidance rather than burning retries. CDX requests are throttled to
 1/second, and `showNumPages` is avoided because it is the most expensive query they offer.
 
-`boards.seed.json` (26 verified boards) is bundled regardless, so **Phase 1 is always
-optional** and a fresh clone works without either index.
+`boards.seed.json` (60 verified boards across the three platforms) is bundled regardless,
+so **Phase 1 is always optional** and a fresh clone works without either index.
 
 ## For coding agents (LLMs)
 
@@ -410,8 +411,8 @@ unrunnable without trying it.
 
 The test suite is the fast feedback loop — it covers every filter, all three normalisers,
 the SQLite lifecycle and the archive-parsing paths without touching the network. Run it
-before and after any change. A full `--refresh-boards --all` spans ~12,000 boards across
-three platforms; do not run it casually, and never in a loop. `--ats <one> --limit 10` is
+before and after any change. A full `--refresh-boards --all` spans 13,132 boards across
+three platforms and takes ~26 minutes; do not run it casually, and never in a loop. `--ats <one> --limit 10` is
 the cheap way to exercise a real request path.
 
 **Things that look like bugs but are load-bearing.** Each is pinned by a test; if you
