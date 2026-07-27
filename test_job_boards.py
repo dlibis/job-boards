@@ -622,6 +622,24 @@ def test_every_cli_flag_is_documented_in_the_readme():
     assert not missing, f"undocumented in README.md: {missing}"
 
 
+def test_wiki_does_not_cite_tests_that_do_not_exist():
+    """Generated docs can be confidently wrong, not just incomplete.
+
+    A regeneration once listed `test_migrates_a_pre_multi_ats_database`, which has
+    never existed — the real name is `test_migrates_a_single_ats_database`. Checking
+    that a doc *mentions* something cannot catch that; checking that what it mentions
+    is *real* can, and it is the cheap half of keeping generated prose honest.
+    """
+    here = Path(__file__).parent
+    suite = set(re.findall(r"^def (test_\w+)", (here / "test_job_boards.py").read_text(), re.M))
+    cited = set()
+    for page in (here / "openwiki").rglob("*.md"):
+        cited |= set(re.findall(r"\btest_\w+", page.read_text()))
+    cited.discard("test_job_boards")  # the module, not a test
+    invented = sorted(cited - suite)
+    assert not invented, f"the wiki cites tests that do not exist: {invented}"
+
+
 def test_agent_instructions_do_not_diverge():
     """AGENTS.md and CLAUDE.md carry the same hand-written guidance.
 
