@@ -155,6 +155,23 @@ def test_invalid_payload_raises_rather_than_returning_nothing():
     assert raised, "a shape change must fail loudly, not read as 'no jobs found'"
 
 
+def test_no_filters_returns_every_listed_job():
+    """--all mode: no title, no grep. Unlisted jobs are still excluded."""
+    import ashby_jobs
+    board = {"jobs": [
+        {"title": "Chef", "isListed": True},
+        {"title": "Welder", "isListed": True},
+        {"title": "Secret Role", "isListed": False},
+    ]}
+    original = ashby_jobs.fetch
+    ashby_jobs.fetch = lambda *a, **k: json.dumps(board).encode()
+    try:
+        rows = scan_board("acme", None, False, "fuzzy", None)
+    finally:
+        ashby_jobs.fetch = original
+    assert [r["title"] for r in rows] == ["Chef", "Welder"]
+
+
 def test_plausible_rejects_archive_noise_but_keeps_real_slugs():
     """The archive yields 191k URLs; the shape filter is what makes validation cheap."""
     from ashby_jobs import plausible
@@ -280,6 +297,7 @@ if __name__ == "__main__":
     test_fragments_give_context_and_dedupe()
     test_grep_filters_on_description_and_records_context()
     test_invalid_payload_raises_rather_than_returning_nothing()
+    test_no_filters_returns_every_listed_job()
     test_plausible_rejects_archive_noise_but_keeps_real_slugs()
     test_board_exists_uses_head_and_maps_404_to_false()
     test_db_upsert_preserves_history()

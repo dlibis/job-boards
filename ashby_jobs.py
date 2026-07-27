@@ -227,7 +227,18 @@ def discover_boards(concurrency: int = 8) -> list[str]:
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         live = [s for s, ok in zip(candidates, pool.map(board_exists, candidates)) if ok]
     print(f"  {len(live)} live boards ({len(candidates) - len(live)} dead)", file=sys.stderr)
-    return live
+
+    # Discovery only sees what the archive captured, so a real board that was never
+    # crawled is invisible to it. Union in every slug already known-good rather than
+    # letting a refresh lose boards an earlier run had.
+    known = {s.lower(): s for s in live}
+    for path in (BOARDS_SEED, BOARDS_CACHE):
+        if path.exists():
+            for slug in json.loads(path.read_text()):
+                known.setdefault(slug.lower(), slug)
+    if len(known) > len(live):
+        print(f"  +{len(known) - len(live)} from seed/previous runs", file=sys.stderr)
+    return sorted(known.values(), key=str.lower)
 
 
 def load_boards(refresh: bool, concurrency: int = 8) -> list[str]:
@@ -411,6 +422,12 @@ def main() -> None:
         help="case-insensitive regex searched against the job description; "
         "matching context lands in the 'matched' column",
     )
+    p.add_argument(
+        "--all",
+        action="store_true",
+        help="every listed job on every board, no title or description filter "
+        "(~54,000 jobs)",
+    )
     p.add_argument("--limit", type=int, help="max boards to scan (default: all)")
     p.add_argument("--remote", action="store_true", help="only remote postings")
     p.add_argument("--concurrency", type=int, default=8)
@@ -424,9 +441,11 @@ def main() -> None:
     p.add_argument("--no-db", action="store_true", help="skip the database write")
     args = p.parse_args()
 
+    if args.all and (args.title or args.grep):
+        sys.exit("--all takes no filters; drop --title/--grep or drop --all")
     # The title default only applies when nothing else narrows the search. Applying
     # it to a --grep run would silently AND an unrequested title filter onto it.
-    title = args.title or (None if args.grep else "software engineer")
+    title = None if args.all else (args.title or (None if args.grep else "software engineer"))
     try:
         pattern = re.compile(args.grep, re.IGNORECASE) if args.grep else None
     except re.error as e:
@@ -444,10 +463,8 @@ def main() -> None:
     scanned = boards[: args.limit] if args.limit else boards
     criteria = [f"title {title!r} ({args.match})" if title else "",
                 f"description /{args.grep}/" if args.grep else ""]
-    print(
-        f"scanning {len(scanned)} boards for {' + '.join(c for c in criteria if c)}...",
-        file=sys.stderr,
-    )
+    what = " + ".join(c for c in criteria if c) or "every listed job"
+    print(f"scanning {len(scanned)} boards for {what}...", file=sys.stderr)
 
     rows: list[dict] = []
     dead: set[str] = set()

@@ -17,6 +17,7 @@ export ASHBY_SCRAPER_CONTACT="you@example.com"
 ```
 
 ```bash
+uv run ashby_jobs.py --all                                 # every job, ~54,000
 uv run ashby_jobs.py --title "software engineer"
 uv run ashby_jobs.py --title "software engineer" --match exact
 uv run ashby_jobs.py --title "product designer" --remote --limit 200
@@ -25,6 +26,35 @@ uv run test_ashby_jobs.py                  # offline self-check
 ```
 
 Outputs `ashby-jobs.csv` (UTF-8 BOM, so Excel renders `–`/`•`) and `ashby-jobs.json`.
+
+## How complete is this?
+
+Measured, not estimated:
+
+| | count |
+|---|---|
+| Boards discovered and validated live | **3,617** |
+| Jobs returned by `--all` | **54,560** |
+| Jobs on those boards, counted independently | 54,569 |
+| Difference | 9 unlisted postings, excluded on purpose |
+
+So it gets **every listed job on every board it knows about**. The honest limit is the
+board list, not the scraping — and there is no authoritative list of Ashby customers to
+check against, so completeness cannot be proven, only bounded.
+
+Where boards can still be missed:
+
+- **Discovery only sees what the Internet Archive captured.** A board that exists but was
+  never crawled is invisible. This is real, not theoretical: `newtonx` was live but absent
+  from 191k archived URLs. To stop that from costing you anything, `--refresh-boards`
+  unions its results with `boards.seed.json` and the previous `boards.json`, so a refresh
+  never loses a board an earlier run knew about.
+- **New Ashby customers** appear before the archive notices them. Re-run
+  `--refresh-boards` periodically; it takes about a minute.
+- **The shape filter** drops candidates that cannot be slugs. Sampling 150 of the 2,463 it
+  rejected turned up zero real boards, so this looks safe, but it is a sample.
+
+If you find a board this misses, add it to `boards.seed.json` and it is permanent.
 
 ## Match modes
 
