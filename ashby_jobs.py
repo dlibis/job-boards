@@ -12,6 +12,8 @@ filter every board.
     uv run ashby_jobs.py --title "software engineer"
     uv run ashby_jobs.py --title "software engineer" --match exact
     uv run ashby_jobs.py --title "product designer" --remote --limit 200
+    uv run ashby_jobs.py --grep "rust|golang"                  # search descriptions
+    uv run ashby_jobs.py --title engineer --grep "kubernetes"  # both must match
     uv run ashby_jobs.py --refresh-boards
 
 boards.json ships with the repo, so --refresh-boards is optional. Read the README
@@ -25,12 +27,14 @@ import csv
 import gzip
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from html import unescape
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -56,7 +60,11 @@ UA = f"ashby-jobs-scraper/1.0 (public posting API; contact: {_CONTACT})".encode(
 FIELDS = [
     "company", "title", "department", "team", "employmentType",
     "location", "isRemote", "workplaceType", "publishedAt", "jobUrl",
+    "matched",  # context around --grep hits; empty when --grep is not used
 ]
+
+_HTML_TAG = re.compile(r"<[^>]+>")
+_SPACE = re.compile(r"\s+")
 
 
 class NotFound(Exception):
@@ -195,24 +203,64 @@ def matches(job_title: str, wanted: str, mode: str = "fuzzy") -> bool:
     return want in title or (len(title.split()) >= 2 and title in want)
 
 
-def scan_board(slug: str, wanted: str, remote_only: bool, mode: str) -> list[dict]:
+def plain_text(value: str) -> str:
+    """Strip HTML tags, decode entities, collapse whitespace."""
+    return _SPACE.sub(" ", unescape(_HTML_TAG.sub(" ", value))).strip()
+
+
+def fragments(text: str, pattern: re.Pattern[str], limit: int = 2) -> list[str]:
+    """Windows of surrounding text for each match, so a hit can be judged in context."""
+    found: list[str] = []
+    for match in pattern.finditer(text):
+        window = text[max(0, match.start() - 90) : match.end() + 150].strip()
+        if window not in found:
+            found.append(window)
+        if len(found) == limit:
+            break
+    return found
+
+
+def scan_board(
+    slug: str,
+    wanted: str | None,
+    remote_only: bool,
+    mode: str,
+    pattern: re.Pattern[str] | None = None,
+) -> list[dict]:
     """Fetch one board, return flat rows for matching listed jobs.
 
-    Descriptions are dropped at parse time and never retained — they are ~95% of
-    the payload, and holding 3,400 boards' worth would be gigabytes.
+    Descriptions are read only when --grep needs them, and even then only the
+    matched fragments survive — the full text is ~95% of the payload, and holding
+    3,400 boards' worth would be gigabytes.
     """
     data = json.loads(fetch(POSTING_API.format(slug=urllib.parse.quote(slug))))
+    jobs = data.get("jobs")
+    if not isinstance(jobs, list):
+        # Fail loudly on a shape change rather than silently reporting no results.
+        raise ValueError(f"{slug}: response has no jobs array")
+
     rows = []
-    for job in data.get("jobs", []):
+    for job in jobs:
         if not job.get("isListed"):
             continue
-        if not matches(job.get("title", ""), wanted, mode):
+        if wanted and not matches(job.get("title", ""), wanted, mode):
             continue
         if remote_only and not job.get("isRemote"):
             continue
+
+        hits: list[str] = []
+        if pattern is not None:
+            text = plain_text(
+                job.get("descriptionPlain") or job.get("descriptionHtml") or ""
+            )
+            hits = fragments(text, pattern)
+            if not hits:
+                continue
+
         rows.append({
             "company": slug,
-            **{f: job.get(f, "") for f in FIELDS[1:]},
+            **{f: job.get(f, "") for f in FIELDS[1:-1]},
+            "matched": " … ".join(hits),
         })
     return rows
 
@@ -221,12 +269,21 @@ def main() -> None:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--title", default="software engineer", help="title to match")
+    p.add_argument(
+        "--title",
+        help="title to match (default: 'software engineer', unless --grep is given)",
+    )
     p.add_argument(
         "--match",
         choices=("fuzzy", "exact"),
         default="fuzzy",
         help="fuzzy: either string contains the other (default). exact: titles must be equal",
+    )
+    p.add_argument(
+        "--grep",
+        metavar="REGEX",
+        help="case-insensitive regex searched against the job description; "
+        "matching context lands in the 'matched' column",
     )
     p.add_argument("--limit", type=int, help="max boards to scan (default: all)")
     p.add_argument("--remote", action="store_true", help="only remote postings")
@@ -235,10 +292,28 @@ def main() -> None:
     p.add_argument("--out", default="ashby-jobs", help="output filename prefix")
     args = p.parse_args()
 
+    # The title default only applies when nothing else narrows the search. Applying
+    # it to a --grep run would silently AND an unrequested title filter onto it.
+    title = args.title or (None if args.grep else "software engineer")
+    try:
+        pattern = re.compile(args.grep, re.IGNORECASE) if args.grep else None
+    except re.error as e:
+        sys.exit(f"--grep is not a valid regex: {e}")
+    if args.grep and r"\b" not in args.grep:
+        # Silent and severe: `rust` matches "trust", which appears in almost every
+        # description's boilerplate. Measured 1350 hits vs 72 word-bounded.
+        print(
+            rf"note: --grep {args.grep!r} has no \b word boundary, so it matches "
+            rf"inside longer words. Consider '\b{args.grep}\b'.",
+            file=sys.stderr,
+        )
+
     boards = load_boards(args.refresh_boards)
     scanned = boards[: args.limit] if args.limit else boards
+    criteria = [f"title {title!r} ({args.match})" if title else "",
+                f"description /{args.grep}/" if args.grep else ""]
     print(
-        f"scanning {len(scanned)} boards for {args.title!r} ({args.match} match)...",
+        f"scanning {len(scanned)} boards for {' + '.join(c for c in criteria if c)}...",
         file=sys.stderr,
     )
 
@@ -250,7 +325,7 @@ def main() -> None:
         nonlocal errors
         for attempt in range(2):
             try:
-                return scan_board(slug, args.title, args.remote, args.match)
+                return scan_board(slug, title, args.remote, args.match, pattern)
             except NotFound:
                 dead.add(slug)
                 return []

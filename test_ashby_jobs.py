@@ -99,6 +99,62 @@ def test_scan_board_filters_and_flattens(monkeypatched_fetch=None):
     assert not any("escription" in k for k in rows[0]), "descriptions must be dropped"
 
 
+def test_plain_text_strips_markup_and_entities():
+    from ashby_jobs import plain_text
+    assert plain_text("<p>Rust &amp; Go</p>\n\n  <b>here</b>") == "Rust & Go here"
+    assert plain_text("") == ""
+
+
+def test_fragments_give_context_and_dedupe():
+    import re
+    from ashby_jobs import fragments
+    text = "we use kubernetes daily. " * 3 + "the end"
+    hits = fragments(text, re.compile("kubernetes", re.IGNORECASE))
+    assert len(hits) <= 2
+    assert all("kubernetes" in h for h in hits)
+    # identical windows collapse rather than repeating
+    assert len(set(hits)) == len(hits)
+    assert fragments("nothing here", re.compile("kubernetes")) == []
+
+
+def test_grep_filters_on_description_and_records_context():
+    import re
+    import ashby_jobs
+    board = {"jobs": [
+        {"title": "Backend Engineer", "isListed": True,
+         "descriptionPlain": "You will write <b>Rust</b> and Go all day."},
+        {"title": "Backend Engineer", "isListed": True,
+         "descriptionPlain": "We deeply value trust and integrity."},  # 'rust' in 'trust'
+    ]}
+    original = ashby_jobs.fetch
+    ashby_jobs.fetch = lambda *a, **k: json.dumps(board).encode()
+    try:
+        loose = scan_board("acme", None, False, "fuzzy", re.compile("rust", re.I))
+        strict = scan_board("acme", None, False, "fuzzy", re.compile(r"\brust\b", re.I))
+    finally:
+        ashby_jobs.fetch = original
+
+    assert len(loose) == 2, "unbounded 'rust' also matches 'trust' — the documented footgun"
+    assert len(strict) == 1, "word-bounded regex excludes 'trust'"
+    assert "Rust" in strict[0]["matched"]
+    assert "<b>" not in strict[0]["matched"], "markup must be stripped from fragments"
+
+
+def test_invalid_payload_raises_rather_than_returning_nothing():
+    import ashby_jobs
+    original = ashby_jobs.fetch
+    ashby_jobs.fetch = lambda *a, **k: b'{"error": "nope"}'
+    try:
+        raised = False
+        try:
+            scan_board("acme", "engineer", False, "fuzzy")
+        except ValueError:
+            raised = True
+    finally:
+        ashby_jobs.fetch = original
+    assert raised, "a shape change must fail loudly, not read as 'no jobs found'"
+
+
 def test_user_agent_is_header_safe():
     """http.client encodes headers as latin-1; non-ASCII here breaks every request.
 
@@ -133,6 +189,10 @@ if __name__ == "__main__":
     test_exact_matching()
     test_cdx_jsonl_parsing()
     test_scan_board_filters_and_flattens()
+    test_plain_text_strips_markup_and_entities()
+    test_fragments_give_context_and_dedupe()
+    test_grep_filters_on_description_and_records_context()
+    test_invalid_payload_raises_rather_than_returning_nothing()
     test_user_agent_is_header_safe()
     test_csv_quoting()
     print("ok")

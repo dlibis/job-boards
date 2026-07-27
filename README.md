@@ -44,6 +44,35 @@ querying `senior software engineer` also matches every job titled just `Engineer
 `--match exact` — the whole title must equal the query (case- and whitespace-insensitive).
 `software engineer` matches only `Software Engineer`.
 
+## Searching descriptions with `--grep`
+
+Titles are a weak filter — they miss "Software Development Engineer" and tell you nothing
+about the stack. `--grep` runs a case-insensitive regex against the job description and
+puts the surrounding context in a `matched` column, so a hit can be judged without
+opening the posting.
+
+```bash
+uv run ashby_jobs.py --grep '\brust\b|\bgolang\b'          # description only
+uv run ashby_jobs.py --title engineer --grep '\bkubernetes\b'  # both must match
+```
+
+`--title` and `--grep` are ANDed. Giving `--grep` alone drops the title filter entirely
+rather than silently ANDing the default `software engineer` onto it.
+
+**Use `\b`.** Without word boundaries a pattern matches inside longer words, and job
+descriptions are full of boilerplate that will catch you:
+
+| pattern | jobs matched (26 boards) |
+|---|---|
+| `rust\|golang` | **1350** — `rust` matches "t**rust**", which is in nearly every description |
+| `\brust\b\|\bgolang\b` | **72** |
+
+That is an 18x false-positive rate with no visible symptom, so the script warns on stderr
+when a `--grep` pattern contains no `\b`.
+
+Only matched fragments are kept, never whole descriptions — the gzip and memory
+characteristics below are unchanged by `--grep`.
+
 Against the shipped 26 boards, `software engineer` returns **268** jobs fuzzy and **2**
 exact — pick accordingly.
 
@@ -110,8 +139,8 @@ Run `--refresh-boards` once CDX recovers to expand to the full ~3,400 boards.
 ## Skipped, and when to add
 
 - **Multiple CC indexes merged** — one index is plenty. Add if coverage looks thin.
-- **Token/regex title matching** — fuzzy still misses "Software Development Engineer",
-  where the words are present but not contiguous. Add `--match tokens` if that gap bites.
+- **Token title matching** — fuzzy still misses "Software Development Engineer", where
+  the words are present but not contiguous. `--grep` covers most of this need already.
 - **Per-board caching** — postings change daily; caching mostly serves staleness.
 - **Rate-limit backoff for Ashby** — no 429s observed. Add on first sighting.
 
