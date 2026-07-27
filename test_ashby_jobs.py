@@ -155,6 +155,44 @@ def test_invalid_payload_raises_rather_than_returning_nothing():
     assert raised, "a shape change must fail loudly, not read as 'no jobs found'"
 
 
+def test_plausible_rejects_archive_noise_but_keeps_real_slugs():
+    """The archive yields 191k URLs; the shape filter is what makes validation cheap."""
+    from ashby_jobs import plausible
+
+    for good in ("ramp", "keeling-labs", "A1 Garage Door Service", "ScribdInc", "0g"):
+        assert plausible(good), good
+    for junk in (
+        "_next", "api", "favicon.ico",                       # site plumbing
+        "root.6511f3ee_758c_4ed4_8fce_254a11715ed7",         # Ashby embed path
+        "4fc6ba8a-532f-46a7-b1f3-d5490d78120e",              # a posting id, not a board
+        "$10.2K", '"80e0bf43", "environment":"production"',  # comp strings, JS blobs
+        "블록웍스", "", "-" * 80,
+    ):
+        assert not plausible(junk), junk
+
+
+def test_board_exists_uses_head_and_maps_404_to_false():
+    """Validation must not download board payloads — 5,000 GETs would be ~1GB."""
+    import ashby_jobs
+
+    calls = []
+
+    def fake_fetch(url, timeout=30, retries=4, method="GET"):
+        calls.append(method)
+        if "nope" in url:
+            raise ashby_jobs.NotFound(url)
+        return b""
+
+    original = ashby_jobs.fetch
+    ashby_jobs.fetch = fake_fetch
+    try:
+        assert ashby_jobs.board_exists("ramp") is True
+        assert ashby_jobs.board_exists("nope12345") is False
+    finally:
+        ashby_jobs.fetch = original
+    assert calls == ["HEAD", "HEAD"], f"expected HEAD probes, got {calls}"
+
+
 def test_db_upsert_preserves_history():
     """first_seen must survive re-scrapes; that is the point of the database."""
     import sqlite3
@@ -242,6 +280,8 @@ if __name__ == "__main__":
     test_fragments_give_context_and_dedupe()
     test_grep_filters_on_description_and_records_context()
     test_invalid_payload_raises_rather_than_returning_nothing()
+    test_plausible_rejects_archive_noise_but_keeps_real_slugs()
+    test_board_exists_uses_head_and_maps_404_to_false()
     test_db_upsert_preserves_history()
     test_db_keeps_grep_context_from_earlier_runs()
     test_db_skips_rows_without_an_id()

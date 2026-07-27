@@ -51,6 +51,12 @@ BOARDS_SEED = HERE / "boards.seed.json"
 BOARDS_CACHE = HERE / "boards.json"
 POSTING_API = "https://api.ashbyhq.com/posting-api/job-board/{slug}"
 COLLINFO = "https://index.commoncrawl.org/collinfo.json"
+WAYBACK_CDX = (
+    "http://web.archive.org/cdx/search/cdx?url=jobs.ashbyhq.com"
+    "&matchType=domain&fl=original&collapse=urlkey&output=json"
+)
+_SLUG_SHAPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,60}$")
+_SLUG_JUNK = {"_next", "api", "static", "assets", "meeting", "b", "favicon.ico"}
 # Common Crawl asks that clients identify themselves. Set ASHBY_SCRAPER_CONTACT to
 # your own email so a server operator can reach *you* about *your* traffic.
 #
@@ -84,14 +90,14 @@ class RateLimited(Exception):
     too high; a repeatedly-abusive IP can be blocked for 24 hours."""
 
 
-def fetch(url: str, timeout: int = 30, retries: int = 4) -> bytes:
+def fetch(url: str, timeout: int = 30, retries: int = 4, method: str = "GET") -> bytes:
     """GET a URL, transparently gunzipping. Raises NotFound on 404.
 
     Common Crawl's CDX index 502/504s under load often enough that a single
     attempt fails maybe half the time, so 5xx gets exponential backoff.
     """
     req = urllib.request.Request(
-        url, headers={"User-Agent": UA, "Accept-Encoding": "gzip"}
+        url, headers={"User-Agent": UA, "Accept-Encoding": "gzip"}, method=method
     )
     for attempt in range(retries):
         try:
@@ -124,15 +130,34 @@ def slug_from_url(url: str) -> str | None:
     return urllib.parse.unquote(first) or None
 
 
-def discover_boards(max_pages: int = 20) -> list[str]:
-    """Crawl Common Crawl's CDX index for jobs.ashbyhq.com board slugs."""
+def _add(seen: dict[str, str], url: str) -> None:
+    """Record the first path segment of a board URL, deduping case-insensitively."""
+    slug = slug_from_url(url)
+    if slug:
+        seen.setdefault(slug.lower(), slug)
+
+
+def candidates_from_wayback() -> dict[str, str]:
+    """The Internet Archive's CDX index. Broader than Common Crawl and far more
+    reliable — it is the default for that reason."""
+    print("querying the Wayback Machine...", file=sys.stderr)
+    rows = json.loads(fetch(WAYBACK_CDX, timeout=300, retries=3))
+    seen: dict[str, str] = {}
+    for row in rows[1:]:  # first row is the header
+        _add(seen, row[0])
+    print(f"  {len(rows) - 1} archived URLs -> {len(seen)} candidates", file=sys.stderr)
+    return seen
+
+
+def candidates_from_commoncrawl(max_pages: int = 20) -> dict[str, str]:
+    """Common Crawl's CDX index. Kept as a fallback: narrower coverage, and it
+    sheds requests under load often enough to fail for hours at a time."""
     collections = json.loads(fetch(COLLINFO))
     cdx = collections[0]["cdx-api"]
-    print(f"using index {collections[0]['id']}", file=sys.stderr)
-
+    print(f"querying Common Crawl index {collections[0]['id']}...", file=sys.stderr)
     query = f"{cdx}?url=jobs.ashbyhq.com%2F*&output=json&fl=url"
 
-    seen: dict[str, str] = {}  # lowercased slug -> first-seen casing
+    seen: dict[str, str] = {}
     # ponytail: walk pages until one comes back empty rather than asking
     # showNumPages first — that query is the most expensive one CDX offers and
     # times out far more often than the pages themselves.
@@ -145,21 +170,67 @@ def discover_boards(max_pages: int = 20) -> list[str]:
             break
         if not body.strip():
             break
-        # CDX responses are JSONL, not a JSON array.
-        for line in body.splitlines():
-            if not line.strip():
-                continue
-            slug = slug_from_url(json.loads(line)["url"])
-            if slug:
-                seen.setdefault(slug.lower(), slug)
-        print(f"  page {page}: {len(seen)} slugs so far", file=sys.stderr)
-
-    # ponytail: no denylist for junk paths (_next, api, ...) — Phase 2's 404 prunes
-    # them, and that self-corrects as Ashby's customer list changes.
-    return sorted(seen.values(), key=str.lower)
+        for line in body.splitlines():  # JSONL, not a JSON array
+            if line.strip():
+                _add(seen, json.loads(line)["url"])
+        print(f"  page {page}: {len(seen)} candidates so far", file=sys.stderr)
+    return seen
 
 
-def load_boards(refresh: bool) -> list[str]:
+def plausible(slug: str) -> bool:
+    """Cheap shape filter, so validation probes thousands of URLs and not 191,000.
+
+    Archived URLs include tracking blobs, compensation strings and JS fragments as
+    "path segments". Every live slug observed is alphanumeric plus space, dot,
+    underscore or hyphen; `root.<uuid>` is Ashby's internal embed path, never a board.
+    """
+    return (
+        bool(_SLUG_SHAPE.match(slug))
+        and slug.lower() not in _SLUG_JUNK
+        and not slug.lower().startswith("root.")
+        and not re.fullmatch(r"[0-9a-f-]{30,}", slug.lower())
+    )
+
+
+def board_exists(slug: str) -> bool:
+    """HEAD the posting API: 200 for a real board, 404 otherwise.
+
+    HEAD returns the status with a zero-length body, so validating ~5,000 candidates
+    costs nothing. A GET would download ~220KB per live board — most of a gigabyte
+    just to learn which slugs are real.
+    """
+    try:
+        fetch(POSTING_API.format(slug=urllib.parse.quote(slug)),
+              timeout=25, retries=2, method="HEAD")
+        return True
+    except NotFound:
+        return False
+    except Exception:
+        return False  # transient failure: drop it, the next refresh can find it
+
+
+def discover_boards(concurrency: int = 8) -> list[str]:
+    """Find every Ashby board slug: harvest candidates, then validate each one."""
+    try:
+        seen = candidates_from_wayback()
+    except Exception as e:
+        print(f"  Wayback failed ({e}); falling back to Common Crawl", file=sys.stderr)
+        seen = candidates_from_commoncrawl()
+
+    candidates = sorted(
+        (s for s in seen.values() if plausible(s)), key=str.lower
+    )
+    print(
+        f"validating {len(candidates)} plausible slugs against the posting API...",
+        file=sys.stderr,
+    )
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        live = [s for s, ok in zip(candidates, pool.map(board_exists, candidates)) if ok]
+    print(f"  {len(live)} live boards ({len(candidates) - len(live)} dead)", file=sys.stderr)
+    return live
+
+
+def load_boards(refresh: bool, concurrency: int = 8) -> list[str]:
     if not refresh:
         for path in (BOARDS_CACHE, BOARDS_SEED):
             if path.exists():
@@ -167,7 +238,7 @@ def load_boards(refresh: bool) -> list[str]:
                 print(f"{len(boards)} boards from {path.name}", file=sys.stderr)
                 return boards
     try:
-        boards = discover_boards()
+        boards = discover_boards(concurrency)
     except RateLimited:
         sys.exit(
             "Common Crawl returned 503: request rate too high. Their docs say to slow "
@@ -177,10 +248,8 @@ def load_boards(refresh: bool) -> list[str]:
     except (urllib.error.URLError, TimeoutError) as e:
         sys.exit(
             f"board discovery failed: {e}\n"
-            "Common Crawl's CDX server is heavily loaded and sheds requests under "
-            "queue overflow (nginx then returns 502/504). This is server-side and "
-            "affects everyone — not your IP or your query. Retry later; the shipped "
-            "boards.json means this phase is optional."
+            "Both the Wayback Machine and Common Crawl were unreachable. Retry "
+            "later; the bundled boards.seed.json means this phase is optional."
         )
     BOARDS_CACHE.write_text(json.dumps(boards, indent=2))
     print(f"cached {len(boards)} slugs -> {BOARDS_CACHE.name}", file=sys.stderr)
@@ -371,7 +440,7 @@ def main() -> None:
             file=sys.stderr,
         )
 
-    boards = load_boards(args.refresh_boards)
+    boards = load_boards(args.refresh_boards, args.concurrency)
     scanned = boards[: args.limit] if args.limit else boards
     criteria = [f"title {title!r} ({args.match})" if title else "",
                 f"description /{args.grep}/" if args.grep else ""]
