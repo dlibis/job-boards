@@ -250,6 +250,48 @@ def test_db_keeps_grep_context_from_earlier_runs():
         assert kept == "uses Rust daily"
 
 
+def test_migrates_a_database_created_before_closed_at():
+    """Upgrade path. Every other db test starts from a fresh schema, so none of
+    them exercise a database that predates the closed_at column."""
+    import sqlite3
+    import tempfile
+    from pathlib import Path
+    from ashby_jobs import FIELDS as F, save
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "old.db"
+        # exactly the old schema: no closed_at, no closed_at index
+        cols = ",".join(f"{c} TEXT" for c in F if c != "id")
+        con = sqlite3.connect(db)
+        con.executescript(f"""
+            CREATE TABLE jobs (id TEXT PRIMARY KEY, {cols},
+                               first_seen TEXT NOT NULL, last_seen TEXT NOT NULL);
+            CREATE INDEX jobs_company ON jobs(company);
+            CREATE INDEX jobs_last_seen ON jobs(last_seen);
+        """)
+        con.execute(
+            "INSERT INTO jobs (id, company, first_seen, last_seen) VALUES "
+            "('old-1','acme','2026-01-01T00:00:00+00:00','2026-01-01T00:00:00+00:00')"
+        )
+        con.commit()
+        con.close()
+
+        row = {f: "" for f in F} | {"id": "new-1", "company": "acme"}
+        new, updated, closed = save([row], db, "2026-02-02T00:00:00+00:00", covered=["acme"])
+
+        con = sqlite3.connect(db)
+        assert "closed_at" in {c[1] for c in con.execute("PRAGMA table_info(jobs)")}
+        # the pre-existing row survives the migration and is closed by this sweep
+        got = dict(con.execute("SELECT id, closed_at FROM jobs"))
+        assert got["old-1"] == "2026-02-02T00:00:00+00:00"
+        assert got["new-1"] is None
+        assert (new, updated, closed) == (1, 0, 1)
+        # and the index that previously broke the migration now exists
+        idx = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'")}
+        assert "jobs_closed_at" in idx
+
+
 def test_unfiltered_run_closes_vanished_postings():
     import sqlite3
     import tempfile
@@ -370,6 +412,7 @@ if __name__ == "__main__":
     test_board_exists_uses_head_and_maps_404_to_false()
     test_db_upsert_preserves_history()
     test_db_keeps_grep_context_from_earlier_runs()
+    test_migrates_a_database_created_before_closed_at()
     test_unfiltered_run_closes_vanished_postings()
     test_filtered_run_never_closes_anything()
     test_closing_is_scoped_to_boards_actually_scanned()

@@ -367,6 +367,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     last_seen   TEXT NOT NULL,
     closed_at   TEXT
 );
+"""
+
+# Kept separate from _SCHEMA and run only after the migration below. An index on
+# closed_at cannot be created on a database that predates the column, and putting
+# it in the same script made the CREATE fail before the ALTER TABLE could run.
+_INDEXES = """
 CREATE INDEX IF NOT EXISTS jobs_company ON jobs(company);
 CREATE INDEX IF NOT EXISTS jobs_last_seen ON jobs(last_seen);
 CREATE INDEX IF NOT EXISTS jobs_closed_at ON jobs(closed_at);
@@ -394,10 +400,12 @@ def save(
     keyed = {r["id"]: r for r in rows if r.get("id")}
     cols = ["id", *[f for f in FIELDS if f != "id"]]
     with sqlite3.connect(db_path) as con:
+        # Order matters: create the table, then migrate, then index. Indexing
+        # closed_at before the migration adds it fails on any pre-closed_at database.
         con.executescript(_SCHEMA)
-        # Databases created before closed_at existed.
         if "closed_at" not in {c[1] for c in con.execute("PRAGMA table_info(jobs)")}:
             con.execute("ALTER TABLE jobs ADD COLUMN closed_at TEXT")
+        con.executescript(_INDEXES)
         known = {row[0] for row in con.execute("SELECT id FROM jobs")}
         con.executemany(
             f"INSERT INTO jobs ({','.join(cols)}, first_seen, last_seen) "
