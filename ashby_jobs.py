@@ -44,10 +44,14 @@ POSTING_API = "https://api.ashbyhq.com/posting-api/job-board/{slug}"
 COLLINFO = "https://index.commoncrawl.org/collinfo.json"
 # Common Crawl asks that clients identify themselves. Set ASHBY_SCRAPER_CONTACT to
 # your own email so a server operator can reach *you* about *your* traffic.
-UA = (
-    "ashby-jobs-scraper/1.0 (public posting API; contact: "
-    f"{os.environ.get('ASHBY_SCRAPER_CONTACT', 'unset — set ASHBY_SCRAPER_CONTACT')})"
-)
+#
+# Must be ASCII: http.client encodes headers as latin-1, so a stray em-dash or an
+# accented character here makes every single request raise before it leaves the
+# process. Non-ASCII is stripped rather than allowed to break the run.
+_CONTACT = os.environ.get("ASHBY_SCRAPER_CONTACT", "set ASHBY_SCRAPER_CONTACT")
+UA = f"ashby-jobs-scraper/1.0 (public posting API; contact: {_CONTACT})".encode(
+    "ascii", "ignore"
+).decode()
 
 FIELDS = [
     "company", "title", "department", "team", "employmentType",

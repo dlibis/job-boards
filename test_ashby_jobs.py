@@ -99,6 +99,17 @@ def test_scan_board_filters_and_flattens(monkeypatched_fetch=None):
     assert not any("escription" in k for k in rows[0]), "descriptions must be dropped"
 
 
+def test_user_agent_is_header_safe():
+    """http.client encodes headers as latin-1; non-ASCII here breaks every request.
+
+    Regression: an em-dash in the unset-contact fallback made a fresh clone fail
+    100% of requests before any network call.
+    """
+    import ashby_jobs
+    ashby_jobs.UA.encode("latin-1")  # raises if the UA is not header-safe
+    assert ashby_jobs.UA.isascii()
+
+
 def test_csv_quoting():
     """stdlib csv handles RFC4180 escaping — this pins that it stays correct."""
     buf = io.StringIO()
@@ -122,5 +133,6 @@ if __name__ == "__main__":
     test_exact_matching()
     test_cdx_jsonl_parsing()
     test_scan_board_filters_and_flattens()
+    test_user_agent_is_header_safe()
     test_csv_quoting()
     print("ok")
