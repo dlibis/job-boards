@@ -7,6 +7,10 @@ Ashby's posting API is public but per-company, keyed by a board slug, with no gl
 search endpoint. This finds the boards — 3,617 of them — then fans out across all of
 them. **~54,000 live postings, start to finish in about two minutes.**
 
+> **Engineers and coding agents:** the [`openwiki/`](openwiki/quickstart.md) wiki is the
+> map of the code — architecture, workflows, data model, runbook. Agents should start
+> with [For coding agents](#for-coding-agents-llms) below.
+
 ## Quick start
 
 No dataset is bundled; you generate your own. The only prerequisite is
@@ -335,6 +339,58 @@ error with that guidance rather than burning retries. CDX requests are throttled
 
 `boards.seed.json` (26 verified boards) is bundled regardless, so **Phase 1 is always
 optional** and a fresh clone works without either index.
+
+## For coding agents (LLMs)
+
+If you have been pointed at this repository by a human, read this section first, then
+[`openwiki/quickstart.md`](openwiki/quickstart.md).
+
+**Orientation.** `README.md` is the user-facing narrative. `openwiki/` is the
+engineer-facing map — [architecture](openwiki/architecture/overview.md),
+[board discovery](openwiki/workflows/board-discovery.md),
+[job scrape](openwiki/workflows/job-scrape.md),
+[data model](openwiki/architecture/data-model.md),
+[runbook](openwiki/operations/runbook.md), [testing](openwiki/testing.md).
+The whole tool is one file, `ashby_jobs.py`, ~330 lines, zero dependencies.
+
+**Before you run anything network-facing:**
+
+```bash
+export ASHBY_SCRAPER_CONTACT="the-user@example.com"   # ask; do not invent an address
+uv run test_ashby_jobs.py                             # offline, no network, ~1s
+```
+
+The test suite is the fast feedback loop — it covers every filter, the SQLite lifecycle
+and the archive-parsing paths without touching the network. Run it before and after any
+change. A full `--refresh-boards --all` takes ~2 minutes and downloads ~130MB; do not
+run it casually, and never in a loop.
+
+**Things that look like bugs but are load-bearing.** Each is pinned by a test; if you
+"fix" one, a test will fail and it is telling you the truth:
+
+| Looks wrong | Why it is correct |
+|---|---|
+| Fuzzy match requires a ≥2-word title in the reverse direction | Without it, `--title "senior software engineer"` matches every job titled `Engineer` |
+| Only `--all` runs set `closed_at` | A filtered run cannot distinguish "gone" from "did not match my filter" |
+| Closing is scoped to boards actually scanned | Otherwise `--limit 10` would "close" postings at 3,600 unvisited companies |
+| Validation uses `HEAD`, not `GET` | `GET` would download ~220KB per board — near a gigabyte per refresh |
+| The User-Agent is stripped to ASCII | HTTP headers are latin-1; one em-dash made *every* request fail |
+| `boards.json` is gitignored, `boards.seed.json` is committed | A full crawl is effectively Ashby's customer list and must not be published |
+
+**Do not commit:** `boards.json`, `*.csv`, `*.json` outputs, `*.db`. `.gitignore` denies
+these by default and allows only `boards.seed.json`. If you add an output format, add it
+to `.gitignore` in the same change.
+
+**Do not hand-edit `openwiki/`.** Those pages are generated. Change the source or the
+README and let OpenWiki regenerate them (`openwiki --update`).
+
+**Network etiquette is a requirement, not a style preference.** Concurrency is capped at
+8, Common Crawl is throttled to its stated 1 request/second, and every request identifies
+itself. Do not raise these to make something finish faster.
+
+**If you are adding a search mode,** note that `--grep` patterns without `\b` are a
+documented footgun (`rust` matches "t**rust**": 1350 hits vs 72). The script warns about
+it. Keep that warning.
 
 ## Skipped, and when to add
 
