@@ -49,12 +49,53 @@ Where boards can still be missed:
   from 191k archived URLs. To stop that from costing you anything, `--refresh-boards`
   unions its results with `boards.seed.json` and the previous `boards.json`, so a refresh
   never loses a board an earlier run knew about.
-- **New Ashby customers** appear before the archive notices them. Re-run
-  `--refresh-boards` periodically; it takes about a minute.
+- **New Ashby customers** appear before the archive notices them — a median of 48 days
+  before, measured above. Re-run `--refresh-boards` monthly, or add the slug by hand.
 - **The shape filter** drops candidates that cannot be slugs. Sampling 150 of the 2,463 it
   rejected turned up zero real boards, so this looks safe, but it is a sample.
 
 If you find a board this misses, add it to `boards.seed.json` and it is permanent.
+
+## How recent is the data?
+
+Two independent clocks. Job data is live; the board list lags.
+
+**Jobs are real-time.** Every run hits Ashby's API directly — nothing is cached — so you
+get postings published hours ago. Measured across a full 54,572-job pull:
+
+| posted within | jobs | share |
+|---|---|---|
+| today | 946 | 1.7% |
+| 7 days | 6,754 | 12.4% |
+| 30 days | 19,780 | 36.2% |
+| 90 days | 37,614 | 68.9% |
+
+Median posting age is 48 days. That is the shape of the job market, not scrape lag.
+
+**Board discovery lags by ~48 days.** A company that adopts Ashby is invisible until the
+Internet Archive crawls its board. Comparing each board's first archive capture against
+its oldest surviving posting:
+
+| percentile | lag before the archive first saw the board |
+|---|---|
+| p25 | 20 days |
+| **p50** | **48 days** |
+| p75 | 110 days |
+| p90 | 257 days |
+
+The archive is actively crawling — 348 of the 3,617 boards were captured within the last
+week, some the same day — but a brand-new customer typically waits about seven weeks to
+become discoverable.
+
+**Why the lag matters less than it looks.** A board only has to be discovered once; after
+that every scrape reads live data from it. The lag is a one-time cost per company, not a
+staleness tax on jobs, and it only applies to companies that adopted Ashby in the last
+couple of months. For the other ~3,600 it is already paid.
+
+Practically: re-run `--refresh-boards` monthly (about 80 seconds). Running it daily buys
+nothing, because the archive will not have moved. If you need one specific new company
+immediately, skip the archive entirely — add its slug to `boards.seed.json` and it is
+permanent from the next run.
 
 ## Match modes
 
@@ -193,6 +234,8 @@ Full scrape of all 3,611 boards for `software engineer`: **4,375 jobs in 25 seco
 | Descriptions are ~95% of the payload | read only for `--grep`, never accumulated |
 | `HEAD` on the posting API | 200 with a 0-byte body, or 404 — free validation |
 | Wayback CDX for `jobs.ashbyhq.com` | 191,117 URLs in 34s → **3,611 live boards** |
+| Posting data | live, uncached — 946 jobs published the same day |
+| Archive lag for a new board | median 48 days (p90 257) |
 | Common Crawl CDX | 502/504 on essentially every request; see below |
 
 ## Why Common Crawl is only the fallback
