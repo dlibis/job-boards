@@ -502,6 +502,14 @@ sees on a company's job board page. Requests are capped at 8 concurrent, Common 
 throttled to their stated 1/second, and every request identifies itself via
 `JOB_SCRAPER_CONTACT`. Please keep it that way if you fork.
 
+## Author
+
+Built by Matt Herzog.
+
+- LinkedIn — [mtmherzog](https://www.linkedin.com/in/mtmherzog)
+- X — [@mattherzogx](https://x.com/mattherzogx)
+- YouTube — [@mattherzogtv](https://www.youtube.com/@mattherzogtv)
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
