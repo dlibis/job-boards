@@ -60,7 +60,7 @@ erDiagram
     }
 ```
 
-The table is created by `_SCHEMA` in `/ashby_jobs.py`. Indexes exist on `company`, `last_seen`, and `closed_at`. `save()` also migrates databases created before `closed_at` by adding the column if missing.
+The table is created by `_SCHEMA` in `/ashby_jobs.py`. `save()` creates the table, adds `closed_at` when opening a database that predates that column, and only then creates indexes on `company`, `last_seen`, and `closed_at`. That order matters because a `closed_at` index cannot be created against the old schema before the migration runs.
 
 ## Upsert rules
 
@@ -86,4 +86,4 @@ Closing is scoped to boards actually scanned. If `--limit` scanned only `acme`, 
 
 ## Change guidance
 
-Any schema or lifecycle change should be made with tests first or alongside source changes. Update [testing](../testing.md) for upsert preservation, migration behavior, filtered-run safety, and reopen behavior. Update [operations](../operations/runbook.md) if SQL examples or scheduling advice change.
+Any schema or lifecycle change should be made with tests first or alongside source changes. Update [testing](../testing.md) for upsert preservation, migration from older databases, filtered-run safety, and reopen behavior. Update [operations](../operations/runbook.md) if SQL examples or scheduling advice change.

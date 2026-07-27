@@ -36,7 +36,7 @@ The working tree observed during this init run included generated output files s
 
 | Path | Role | Notes |
 |---|---|---|
-| `/.github/workflows/openwiki-update.yml` | Scheduled/manual OpenWiki update workflow. | Currently untracked in the provided git status; see [operations](operations/runbook.md). |
+| `/.github/workflows/openwiki-update.yml` | Manual OpenWiki update workflow, with the generated daily schedule commented out until `OPENROUTER_API_KEY` exists. | Uses pinned actions and sets up `uv`; see [operations](operations/runbook.md). |
 | `/AGENTS.md` | Agent-facing pointer to OpenWiki docs. | Do not rewrite during normal wiki updates. |
 | `/CLAUDE.md` | Claude-facing pointer to OpenWiki docs. | Do not rewrite during normal wiki updates. |
 | `/openwiki/INSTRUCTIONS.md` | User-authored OpenWiki brief for this repository. | Control metadata, not generated documentation. |

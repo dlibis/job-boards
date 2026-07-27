@@ -23,7 +23,7 @@ The main script, `/ashby_jobs.py`, supports these core use cases:
 
 ## First commands
 
-The repository is designed to run through `uv` using script metadata in `/ashby_jobs.py` and `/test_ashby_jobs.py`; both declare Python `>=3.11` and no dependencies.
+The repository is designed to run through `uv` using script metadata in `/ashby_jobs.py` and `/test_ashby_jobs.py`; both declare Python `>=3.11` and no dependencies. The current source also imports cleanly on Python 3.9+ when `uv` is unavailable, so the offline test suite has a bare-`python3` fallback.
 
 ```bash
 export ASHBY_SCRAPER_CONTACT="you@example.com"
@@ -31,6 +31,7 @@ uv run ashby_jobs.py --refresh-boards --all
 uv run ashby_jobs.py --title "software engineer" --match exact
 uv run ashby_jobs.py --grep '\brust\b|\bgolang\b'
 uv run test_ashby_jobs.py
+python3 test_ashby_jobs.py  # fallback when uv is unavailable and Python is 3.9+
 ```
 
 Set `ASHBY_SCRAPER_CONTACT` before real network runs so archive operators and API owners can identify the traffic source. The code strips non-ASCII characters from the fallback contact string because HTTP headers must be latin-1 safe.
@@ -55,14 +56,14 @@ Recent commits show a progression from a simple public-board scraper into a more
 - SQLite accumulation was added so repeated scrapes preserve `first_seen` and `last_seen`.
 - Discovery moved to Wayback-first with `HEAD` validation because Common Crawl was less reliable and narrower.
 - `--all` was added and board refreshes were changed to union archive results with seed and previous cache.
-- The latest change tracks disappeared postings by stamping `closed_at` after unfiltered scans only.
+- Recent data-model work added disappearance tracking through `closed_at`, then fixed migration ordering so databases created before that column can be upgraded safely.
 
 ## Change checklist for future agents
 
 1. Read the page matching the area you are changing, then inspect the referenced source functions in `/ashby_jobs.py` and tests in `/test_ashby_jobs.py`.
 2. Keep generated outputs (`*.csv`, `*.json`, `*.db`, `boards.json`) out of documentation examples except as outputs; `.gitignore` intentionally denies them.
 3. Preserve the operational contract that public scraping is bounded, identifiable, and low-impact.
-4. Run `uv run test_ashby_jobs.py` in an environment with Python 3.11+. If `uv` is unavailable, do not assume local `python3` is sufficient.
+4. Run `uv run test_ashby_jobs.py` first. If `uv` is unavailable, run `python3 test_ashby_jobs.py`; the source keeps a no-uv fallback working on Python 3.9+.
 5. When changing data retention or lifecycle semantics, update the [data model](architecture/data-model.md), [operations runbook](operations/runbook.md), and tests together.
 
 ## Backlog

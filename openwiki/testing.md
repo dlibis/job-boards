@@ -13,9 +13,10 @@ The test suite is `/test_ashby_jobs.py`, a dependency-free script meant to be ru
 
 ```bash
 uv run test_ashby_jobs.py
+python3 test_ashby_jobs.py  # fallback when uv is unavailable and Python is 3.9+
 ```
 
-Both the application and test scripts declare `requires-python = ">=3.11"` in their `uv` script headers and use modern type syntax. During this init run, the host had no `uv` and `python3` was 3.9.6; running `python3 test_ashby_jobs.py` failed during import on `str | None`. Use `uv` or a Python 3.11+ interpreter before judging test health.
+Both the application and test scripts declare `requires-python = ">=3.11"` in their `uv` script headers. `/ashby_jobs.py` also uses `from __future__ import annotations` so the module imports under Python 3.9+ when `uv` is unavailable. Prefer `uv run test_ashby_jobs.py`; if `uv` is missing, run `python3 test_ashby_jobs.py` before reporting test health as unverified.
 
 ## Coverage map
 
@@ -26,7 +27,7 @@ Both the application and test scripts declare `requires-python = ">=3.11"` in th
 | Board scanning | `test_scan_board_filters_and_flattens`, `test_no_filters_returns_every_listed_job`, `test_invalid_payload_raises_rather_than_returning_nothing` | Listed-only filtering, remote filtering, row shape, all-job mode, loud failure on API shape changes. |
 | Description grep | `test_plain_text_strips_markup_and_entities`, `test_fragments_give_context_and_dedupe`, `test_grep_filters_on_description_and_records_context` | HTML stripping, context windows, dedupe, word-boundary false-positive behavior. |
 | Discovery validation | `test_plausible_rejects_archive_noise_but_keeps_real_slugs`, `test_board_exists_uses_head_and_maps_404_to_false` | Shape filter, real slug preservation, `HEAD` validation, 404-to-false mapping. |
-| SQLite history | `test_db_upsert_preserves_history`, `test_db_keeps_grep_context_from_earlier_runs`, `test_unfiltered_run_closes_vanished_postings`, `test_filtered_run_never_closes_anything`, `test_closing_is_scoped_to_boards_actually_scanned`, `test_db_skips_rows_without_an_id` | `first_seen` preservation, `last_seen` refresh, matched-context retention, closed-posting lifecycle, coverage scoping, id requirement. |
+| SQLite history | `test_db_upsert_preserves_history`, `test_db_keeps_grep_context_from_earlier_runs`, `test_migrates_a_database_created_before_closed_at`, `test_unfiltered_run_closes_vanished_postings`, `test_filtered_run_never_closes_anything`, `test_closing_is_scoped_to_boards_actually_scanned`, `test_db_skips_rows_without_an_id` | `first_seen` preservation, `last_seen` refresh, matched-context retention, pre-`closed_at` database migration, closed-posting lifecycle, coverage scoping, id requirement. |
 | Output and headers | `test_user_agent_is_header_safe`, `test_csv_quoting` | ASCII-safe user agent, CSV escaping, Unicode punctuation round trips. |
 
 ## Test style
@@ -37,7 +38,7 @@ Tests monkeypatch `ashby_jobs.fetch` directly for scan and validation scenarios 
 
 - For CLI filter changes, add tests that call `matches()` or `scan_board()` directly and include negative cases.
 - For board discovery changes, keep archive fixtures offline and test the parsing/filtering boundaries rather than live services.
-- For database changes, test both first insert and subsequent update behavior. Lifecycle changes should include filtered and unfiltered runs.
+- For database changes, test both first insert and subsequent update behavior. Schema changes should include migration from older on-disk databases; lifecycle changes should include filtered and unfiltered runs.
 - For output changes, assert `FIELDS` and representative CSV/JSON behavior so downstream consumers are not surprised.
 
 The [operations runbook](operations/runbook.md) should be updated whenever the required verification command or runtime environment changes.

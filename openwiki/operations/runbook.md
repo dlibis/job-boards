@@ -38,6 +38,7 @@ uv run ashby_jobs.py --grep '\brust\b|\bgolang\b'
 
 # Offline regression suite.
 uv run test_ashby_jobs.py
+python3 test_ashby_jobs.py  # fallback when uv is unavailable and Python is 3.9+
 ```
 
 The README recommends monthly board refreshes because board discovery depends on archive coverage and has measured lag. Jobs themselves are live on every scrape because the scan phase reads Ashby's posting API directly.
@@ -67,15 +68,13 @@ This is more than cleanup. A full generated `boards.json` is effectively a disco
 | Common Crawl 502 or 504 | Common Crawl index backend overloaded. | Retry later; Wayback is the preferred default. |
 | Board discovery fails entirely | Wayback and Common Crawl unreachable. | Use the committed seed or existing cache; discovery is optional for a fresh clone. |
 | Many board scan errors | Ashby API shape or network behavior may have changed. | Inspect stderr, run tests, and verify `scan_board()` still sees a `jobs` array. |
-| Local `python3 test_ashby_jobs.py` fails on union type syntax | Host Python is older than 3.10 or 3.11. | Use `uv run test_ashby_jobs.py` or a Python 3.11+ interpreter. |
-
-During this init run, `uv` was not available on the host and `python3` was 3.9.6, so direct local tests failed before import on `str | None` syntax. That is an environment limitation, not a test failure in project logic.
+| `uv` is missing from `PATH` | Minimal local or agent environment. | Run `python3 test_ashby_jobs.py`; the source keeps the offline suite working on Python 3.9+. |
 
 ## OpenWiki automation
 
-The repository includes an untracked `.github/workflows/openwiki-update.yml` workflow in the current working tree. It runs daily at 08:00 UTC and on manual dispatch, installs `openwiki@0.2.3` plus Mermaid validation packages, runs `openwiki code --update --print`, and opens a pull request containing `openwiki`, `AGENTS.md`, `CLAUDE.md`, and the workflow file.
+The repository includes `.github/workflows/openwiki-update.yml` for recurring wiki maintenance. It is manual-only until the repository has an `OPENROUTER_API_KEY` secret; the generated daily schedule is intentionally commented out so missing credentials do not fail every morning. The workflow checks out the repository, sets up Node.js, installs `uv`, installs `openwiki@0.2.3` plus Mermaid validation packages, runs `openwiki code --update --print`, and opens a pull request containing `openwiki`, `AGENTS.md`, `CLAUDE.md`, and the workflow file.
 
-Root `AGENTS.md` and `CLAUDE.md` both direct future agents to start with `openwiki/quickstart.md`. Treat `/openwiki/INSTRUCTIONS.md` as user-authored scope metadata and do not rewrite it during routine updates.
+Actions in the workflow are pinned to commit SHAs, including `astral-sh/setup-uv`, because the job has `contents: write` and `pull-requests: write`. Root `AGENTS.md` and `CLAUDE.md` both direct future agents to start with `openwiki/quickstart.md` and document the same no-uv test fallback as the [testing guide](../testing.md). Treat `/openwiki/INSTRUCTIONS.md` as user-authored scope metadata and do not rewrite it during routine updates.
 
 ## Change guidance
 
