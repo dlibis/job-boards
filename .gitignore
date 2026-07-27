@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+
+# Scrape output — regenerated on every run, not shared state.
+ashby-jobs.csv
+ashby-jobs.json
