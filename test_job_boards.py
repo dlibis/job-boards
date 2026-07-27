@@ -607,6 +607,51 @@ def test_db_skips_rows_without_an_id():
 # --------------------------------------------------------------------------- #
 
 
+def test_every_cli_flag_is_documented_in_the_readme():
+    """Docs drift silently; this makes it a test failure.
+
+    --since, --new-only and --refresh-recent all shipped before the agent
+    instructions mentioned them, because nothing checked. A flag that exists and
+    is undocumented is a feature nobody can find.
+    """
+    src = (Path(__file__).parent / "job_boards.py").read_text()
+    flags = sorted(set(re.findall(r'p\.add_argument\(\s*"(--[a-z-]+)"', src)))
+    assert len(flags) > 10, f"flag extraction looks broken, found {flags}"
+    readme = (Path(__file__).parent / "README.md").read_text()
+    missing = [f for f in flags if f not in readme]
+    assert not missing, f"undocumented in README.md: {missing}"
+
+
+def test_agent_instructions_do_not_diverge():
+    """AGENTS.md and CLAUDE.md carry the same hand-written guidance.
+
+    Everything below the OPENWIKI marker is maintained by hand and duplicated
+    across both files, so it drifts the moment someone edits one and not the
+    other. OpenWiki owns the block above the marker and may legitimately differ.
+    """
+    marker = "<!-- OPENWIKI:END -->"
+    here = Path(__file__).parent
+    agents = (here / "AGENTS.md").read_text()
+    claude = (here / "CLAUDE.md").read_text()
+    assert marker in agents and marker in claude, "the OpenWiki marker went missing"
+    assert agents.split(marker, 1)[1] == claude.split(marker, 1)[1], (
+        "AGENTS.md and CLAUDE.md have diverged below the OpenWiki marker; "
+        "copy one over the other"
+    )
+
+
+def test_the_closing_rule_is_documented_where_agents_will_see_it():
+    """The one mistake that corrupts data silently, so it must be findable.
+
+    A filter missing from may_close_postings() makes an ordinary-looking run
+    assert that live postings are gone. Agents add filters; they read AGENTS.md.
+    """
+    here = Path(__file__).parent
+    for name in ("AGENTS.md", "README.md"):
+        assert "may_close_postings" in (here / name).read_text(), \
+            f"{name} must tell a contributor to update may_close_postings()"
+
+
 def test_user_agent_is_header_safe():
     """http.client encodes headers as latin-1; non-ASCII breaks every request."""
     import job_boards

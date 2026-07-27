@@ -259,7 +259,12 @@ new key and every existing row is labelled `ats = 'ashby'`, preserving `first_se
 uv run job_boards.py --title "software engineer"     # writes job-boards.db
 uv run job_boards.py --db ~/jobs.db                  # somewhere else
 uv run job_boards.py --no-db                         # CSV/JSON only
+uv run job_boards.py --out weekly                    # weekly.csv/.json instead
 ```
+
+`--out` renames the CSV and JSON outputs; `--concurrency` (default 8) caps parallel
+requests and is the one knob you should leave alone — see
+[Being a good citizen](#being-a-good-citizen).
 
 The run summary reports `N new, M already seen`, so a scheduled scrape tells you what
 changed without diffing anything.
