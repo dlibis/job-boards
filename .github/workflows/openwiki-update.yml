@@ -24,6 +24,13 @@ jobs:
         with:
           node-version: "22"
 
+      # Without uv, OpenWiki cannot run this project's test suite and documents a
+      # "could not verify" caveat instead of checking its claims.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.8.4"
+
       - name: Install OpenWiki
         # mermaid + jsdom are optional; they add high-fidelity validation of Mermaid diagrams. Remove if your wiki has none.
         run: npm install --global openwiki@0.2.3 mermaid@11.16.0 jsdom@29.1.1

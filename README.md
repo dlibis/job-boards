@@ -358,7 +358,12 @@ The whole tool is one file, `ashby_jobs.py`, ~330 lines, zero dependencies.
 ```bash
 export ASHBY_SCRAPER_CONTACT="the-user@example.com"   # ask; do not invent an address
 uv run test_ashby_jobs.py                             # offline, no network, ~1s
+python3 test_ashby_jobs.py                            # same suite without uv (>= 3.9)
 ```
+
+If `uv` is not on your `PATH`, use the second command — it runs the identical suite on
+any Python 3.9+, including macOS's system `python3`. Never report the tests as
+unrunnable without trying it.
 
 The test suite is the fast feedback loop — it covers every filter, the SQLite lifecycle
 and the archive-parsing paths without touching the network. Run it before and after any

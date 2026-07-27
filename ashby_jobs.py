@@ -25,6 +25,12 @@ before running it — Common Crawl's index is frequently overloaded.
 A full run scans ~3,400 boards and takes roughly 2-4 minutes / ~130MB downloaded.
 """
 
+# Keeps `X | None` annotations from being evaluated at import, so the file also
+# imports under Python 3.9 — which is what a bare `python3` is on macOS, and what
+# tooling gets when uv is not on its PATH. uv still provisions 3.11 per the
+# metadata above; this only makes the no-uv fallback in AGENTS.md work.
+from __future__ import annotations
+
 import argparse
 import csv
 import gzip
