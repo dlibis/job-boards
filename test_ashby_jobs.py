@@ -221,11 +221,11 @@ def test_db_upsert_preserves_history():
     with tempfile.TemporaryDirectory() as tmp:
         db = Path(tmp) / "t.db"
 
-        new, updated = save([row], db, "2026-01-01T00:00:00+00:00")
+        new, updated, _ = save([row], db, "2026-01-01T00:00:00+00:00")
         assert (new, updated) == (1, 0)
 
         # same posting, later scrape, title edited in place upstream
-        new, updated = save([row | {"title": "Senior SWE"}], db, "2026-02-02T00:00:00+00:00")
+        new, updated, _ = save([row | {"title": "Senior SWE"}], db, "2026-02-02T00:00:00+00:00")
         assert (new, updated) == (0, 1)
 
         got = sqlite3.connect(db).execute(
@@ -250,13 +250,81 @@ def test_db_keeps_grep_context_from_earlier_runs():
         assert kept == "uses Rust daily"
 
 
+def test_unfiltered_run_closes_vanished_postings():
+    import sqlite3
+    import tempfile
+    from pathlib import Path
+    from ashby_jobs import save
+
+    base = {f: "" for f in FIELDS}
+    a = base | {"id": "a", "company": "acme"}
+    b = base | {"id": "b", "company": "acme"}
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "t.db"
+        save([a, b], db, "2026-01-01T00:00:00+00:00", covered=["acme"])
+
+        # b is gone from acme's board on the next full sweep
+        _, _, closed = save([a], db, "2026-02-02T00:00:00+00:00", covered=["acme"])
+        assert closed == 1
+        got = dict(sqlite3.connect(db).execute("SELECT id, closed_at FROM jobs"))
+        assert got["a"] is None
+        assert got["b"] == "2026-02-02T00:00:00+00:00"
+
+        # b is reposted: it must reopen, not stay closed
+        _, _, closed = save([a, b], db, "2026-03-03T00:00:00+00:00", covered=["acme"])
+        assert closed == 0
+        got = dict(sqlite3.connect(db).execute("SELECT id, closed_at FROM jobs"))
+        assert got["b"] is None, "a reappearing posting must reopen"
+
+
+def test_filtered_run_never_closes_anything():
+    """A --title run missing a job is ambiguous: gone, or just not matched."""
+    import sqlite3
+    import tempfile
+    from pathlib import Path
+    from ashby_jobs import save
+
+    base = {f: "" for f in FIELDS}
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "t.db"
+        save([base | {"id": "a", "company": "acme"}, base | {"id": "b", "company": "acme"}],
+             db, "2026-01-01T00:00:00+00:00", covered=["acme"])
+        # filtered run: only 'a' matched. 'b' must NOT be closed.
+        _, _, closed = save([base | {"id": "a", "company": "acme"}],
+                            db, "2026-02-02T00:00:00+00:00", covered=None)
+        assert closed == 0
+        (open_rows,) = sqlite3.connect(db).execute(
+            "SELECT COUNT(*) FROM jobs WHERE closed_at IS NULL").fetchone()
+        assert open_rows == 2
+
+
+def test_closing_is_scoped_to_boards_actually_scanned():
+    """A --limit run must not close postings on boards it never visited."""
+    import sqlite3
+    import tempfile
+    from pathlib import Path
+    from ashby_jobs import save
+
+    base = {f: "" for f in FIELDS}
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "t.db"
+        save([base | {"id": "a", "company": "acme"}, base | {"id": "z", "company": "other"}],
+             db, "2026-01-01T00:00:00+00:00", covered=["acme", "other"])
+        # this run only covered acme, and saw nothing there
+        _, _, closed = save([], db, "2026-02-02T00:00:00+00:00", covered=["acme"])
+        assert closed == 1
+        got = dict(sqlite3.connect(db).execute("SELECT id, closed_at FROM jobs"))
+        assert got["a"] is not None
+        assert got["z"] is None, "a board that was not scanned must be left alone"
+
+
 def test_db_skips_rows_without_an_id():
     import tempfile
     from pathlib import Path
     from ashby_jobs import save
 
     with tempfile.TemporaryDirectory() as tmp:
-        assert save([{f: "" for f in FIELDS}], Path(tmp) / "t.db", "2026-01-01T00:00:00+00:00") == (0, 0)
+        assert save([{f: "" for f in FIELDS}], Path(tmp) / "t.db", "2026-01-01T00:00:00+00:00") == (0, 0, 0)
 
 
 def test_user_agent_is_header_safe():
@@ -302,6 +370,9 @@ if __name__ == "__main__":
     test_board_exists_uses_head_and_maps_404_to_false()
     test_db_upsert_preserves_history()
     test_db_keeps_grep_context_from_earlier_runs()
+    test_unfiltered_run_closes_vanished_postings()
+    test_filtered_run_never_closes_anything()
+    test_closing_is_scoped_to_boards_actually_scanned()
     test_db_skips_rows_without_an_id()
     test_user_agent_is_header_safe()
     test_csv_quoting()

@@ -358,24 +358,40 @@ CREATE TABLE IF NOT EXISTS jobs (
     id          TEXT PRIMARY KEY,
     {"".join(f"{f} TEXT," for f in FIELDS if f != "id")}
     first_seen  TEXT NOT NULL,
-    last_seen   TEXT NOT NULL
+    last_seen   TEXT NOT NULL,
+    closed_at   TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_company ON jobs(company);
 CREATE INDEX IF NOT EXISTS jobs_last_seen ON jobs(last_seen);
+CREATE INDEX IF NOT EXISTS jobs_closed_at ON jobs(closed_at);
 """
 
 
-def save(rows: list[dict], db_path: Path, seen_at: str) -> tuple[int, int]:
-    """Upsert rows keyed on the Ashby posting id. Returns (new, updated) counts.
+def save(
+    rows: list[dict],
+    db_path: Path,
+    seen_at: str,
+    covered: list[str] | None = None,
+) -> tuple[int, int, int]:
+    """Upsert rows keyed on the Ashby posting id. Returns (new, updated, closed).
 
     first_seen is preserved across runs and last_seen is refreshed, which is the
     whole reason to keep a database rather than just the CSV: it answers "when did
     this posting appear" and "is it still up" across scrapes.
+
+    `covered` is the list of boards this run scanned exhaustively, and is only passed
+    for an unfiltered run. On a filtered run a missing job is ambiguous — it may be
+    gone, or it may simply not have matched --title — so only an unfiltered run has
+    the standing to close a posting. Anything on a covered board that this run did not
+    see is stamped closed_at; anything that reappears has it cleared.
     """
     keyed = {r["id"]: r for r in rows if r.get("id")}
     cols = ["id", *[f for f in FIELDS if f != "id"]]
     with sqlite3.connect(db_path) as con:
         con.executescript(_SCHEMA)
+        # Databases created before closed_at existed.
+        if "closed_at" not in {c[1] for c in con.execute("PRAGMA table_info(jobs)")}:
+            con.execute("ALTER TABLE jobs ADD COLUMN closed_at TEXT")
         known = {row[0] for row in con.execute("SELECT id FROM jobs")}
         con.executemany(
             f"INSERT INTO jobs ({','.join(cols)}, first_seen, last_seen) "
@@ -398,8 +414,28 @@ def save(rows: list[dict], db_path: Path, seen_at: str) -> tuple[int, int]:
                 for r in keyed.values()
             ],
         )
+        closed = 0
+        if covered is not None:
+            con.execute("CREATE TEMP TABLE scanned (company TEXT PRIMARY KEY)")
+            con.executemany(
+                "INSERT OR IGNORE INTO scanned VALUES (?)", [(c,) for c in covered]
+            )
+            cur = con.execute(
+                "UPDATE jobs SET closed_at = ? "
+                "WHERE closed_at IS NULL AND last_seen < ? "
+                "AND company IN (SELECT company FROM scanned)",
+                (seen_at, seen_at),
+            )
+            closed = cur.rowcount
+            # A posting that came back is open again.
+            con.execute(
+                "UPDATE jobs SET closed_at = NULL "
+                "WHERE closed_at IS NOT NULL AND last_seen = ?",
+                (seen_at,),
+            )
+
     new = len(keyed.keys() - known)
-    return new, len(keyed) - new
+    return new, len(keyed) - new, closed
 
 
 def main() -> None:
@@ -513,8 +549,11 @@ def main() -> None:
     if not args.no_db:
         seen_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         db_path = HERE / args.db if not Path(args.db).is_absolute() else Path(args.db)
-        new, updated = save(rows, db_path, seen_at)
-        written += f", {db_path.name} ({new} new, {updated} already seen)"
+        # Only an unfiltered run saw everything, so only it may close postings.
+        covered = scanned if (title is None and pattern is None) else None
+        new, updated, closed = save(rows, db_path, seen_at, covered)
+        written += f", {db_path.name} ({new} new, {updated} already seen"
+        written += f", {closed} closed)" if covered is not None else ")"
 
     print(f"\n{len(rows)} jobs -> {written}", file=sys.stderr)
 

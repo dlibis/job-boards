@@ -1,31 +1,67 @@
 # ashbyhq-jobs
 
-Pull job postings matching a title from Ashby's free public posting API. No API key,
-no account, no dependencies.
+Pull every public job posting from every Ashby job board. No API key, no account, no
+dependencies.
 
-Ashby's public API is per-company with no global search endpoint, so this discovers
-company board slugs from Common Crawl, then fans out across them.
+Ashby's posting API is public but per-company, keyed by a board slug, with no global
+search endpoint. This finds the boards — 3,617 of them — then fans out across all of
+them. **~54,000 live postings, start to finish in about two minutes.**
 
-Only prerequisite is [uv](https://docs.astral.sh/uv/) — no `pip install`, no venv, no
-dependencies. `uv` fetches its own Python.
+## Quick start
 
-Set your own contact address first. Common Crawl asks clients to identify themselves, and
-this puts *your* address on *your* traffic:
+No dataset is bundled; you generate your own. The only prerequisite is
+[uv](https://docs.astral.sh/uv/) — no `pip install`, no venv, no dependencies, and it
+fetches its own Python.
 
 ```bash
+git clone https://github.com/mherzog4/ashbyhq-jobs.git
+cd ashbyhq-jobs
+
+# Identify your traffic. Archive operators ask clients to do this, and it puts
+# your address on your requests rather than someone else's.
 export ASHBY_SCRAPER_CONTACT="you@example.com"
+
+# Find every board, then pull every posting from all of them.
+uv run ashby_jobs.py --refresh-boards --all
 ```
 
+That is the whole thing. Expect roughly:
+
+```
+querying the Wayback Machine...
+  191135 archived URLs -> 7463 candidates
+validating 5000 plausible slugs against the posting API...
+  3611 live boards (1389 dead)
+  +6 from seed/previous runs
+cached 3617 slugs -> boards.json
+scanning 3617 boards for every listed job...
+  3617/3617 boards | 0 404 | 0 err | 54572 matches
+
+54572 jobs -> ashby-jobs.csv, ashby-jobs.json, ashby-jobs.db (54572 new, 0 already seen)
+```
+
+Roughly 80 seconds to discover the boards and 30 to scrape them. You end up with:
+
+| file | what it is |
+|---|---|
+| `ashby-jobs.csv` | every posting, UTF-8 BOM so Excel renders `–`/`•` correctly |
+| `ashby-jobs.json` | the same rows |
+| `ashby-jobs.db` | SQLite, accumulating across runs with `first_seen`/`last_seen` |
+| `boards.json` | the 3,617 discovered slugs, cached so later runs skip discovery |
+
+Later runs reuse `boards.json`, so a re-scrape is just `uv run ashby_jobs.py --all` and
+takes ~30 seconds. Re-run `--refresh-boards` about monthly — see
+[How recent is the data?](#how-recent-is-the-data) for why more often buys nothing.
+
+### Narrower searches
+
 ```bash
-uv run ashby_jobs.py --all                                 # every job, ~54,000
 uv run ashby_jobs.py --title "software engineer"
 uv run ashby_jobs.py --title "software engineer" --match exact
 uv run ashby_jobs.py --title "product designer" --remote --limit 200
-uv run ashby_jobs.py --refresh-boards      # re-crawl the slug list
-uv run test_ashby_jobs.py                  # offline self-check
+uv run ashby_jobs.py --grep '\brust\b|\bgolang\b'    # search descriptions
+uv run test_ashby_jobs.py                            # offline self-check
 ```
-
-Outputs `ashby-jobs.csv` (UTF-8 BOM, so Excel renders `–`/`•`) and `ashby-jobs.json`.
 
 ## How complete is this?
 
@@ -172,9 +208,9 @@ changed without diffing anything.
 SELECT company, title, jobUrl FROM jobs
 WHERE first_seen > datetime('now', '-1 day');
 
--- gone: last seen more than a week ago, so probably filled or pulled
-SELECT company, title, last_seen FROM jobs
-WHERE last_seen < datetime('now', '-7 days') ORDER BY last_seen;
+-- postings that have since disappeared (see the section below)
+SELECT company, title, first_seen, closed_at FROM jobs
+WHERE closed_at IS NOT NULL ORDER BY closed_at DESC;
 
 -- who is hiring hardest
 SELECT company, COUNT(*) n FROM jobs GROUP BY company ORDER BY n DESC LIMIT 10;
@@ -183,9 +219,42 @@ SELECT company, COUNT(*) n FROM jobs GROUP BY company ORDER BY n DESC LIMIT 10;
 SELECT company, title, matched FROM jobs WHERE matched != '';
 ```
 
-One caveat on `last_seen`: it only advances when a run's filters actually match the
-posting. A row going stale means "no recent run matched it", which is not quite the same
-as "the job is gone" — compare like-for-like queries if you care about the difference.
+### Detecting when a posting disappears
+
+`last_seen` alone can't tell you a job is gone, because it only advances when a run's
+filters happen to match. On a `--title` run, "filled last week" and "didn't match this
+time" look identical.
+
+So closing a posting is reserved for **unfiltered `--all` runs**, which are the only ones
+that saw everything. After such a run, any posting on a scanned board that wasn't seen
+gets a `closed_at` stamp; anything reposted has it cleared. Filtered runs never touch it,
+and the closing is scoped to boards actually scanned, so `--limit` can't close jobs at
+companies it skipped.
+
+```
+54581 jobs -> ... (54581 new, 0 already seen, 0 closed)
+54578 jobs -> ... (0 new, 54578 already seen, 3 closed)
+```
+
+Schedule `--all` (daily or weekly) and the database becomes a real fill-rate signal:
+
+```sql
+-- how long postings stay open
+SELECT AVG(julianday(closed_at) - julianday(first_seen)) AS avg_days_open
+FROM jobs WHERE closed_at IS NOT NULL;
+
+-- currently open roles only
+SELECT company, title, jobUrl FROM jobs WHERE closed_at IS NULL;
+
+-- companies filling roles fastest
+SELECT company, COUNT(*) filled,
+       ROUND(AVG(julianday(closed_at) - julianday(first_seen))) avg_days
+FROM jobs WHERE closed_at IS NOT NULL
+GROUP BY company HAVING filled >= 5 ORDER BY avg_days LIMIT 20;
+```
+
+Until you've run `--all` at least twice, `closed_at` is null everywhere — one sweep
+establishes the baseline, the next detects what left.
 
 ## How it works
 
