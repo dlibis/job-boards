@@ -155,6 +155,55 @@ def test_invalid_payload_raises_rather_than_returning_nothing():
     assert raised, "a shape change must fail loudly, not read as 'no jobs found'"
 
 
+def test_db_upsert_preserves_history():
+    """first_seen must survive re-scrapes; that is the point of the database."""
+    import sqlite3
+    import tempfile
+    from pathlib import Path
+    from ashby_jobs import save
+
+    row = {f: "" for f in FIELDS} | {"id": "job-1", "company": "acme", "title": "SWE"}
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "t.db"
+
+        new, updated = save([row], db, "2026-01-01T00:00:00+00:00")
+        assert (new, updated) == (1, 0)
+
+        # same posting, later scrape, title edited in place upstream
+        new, updated = save([row | {"title": "Senior SWE"}], db, "2026-02-02T00:00:00+00:00")
+        assert (new, updated) == (0, 1)
+
+        got = sqlite3.connect(db).execute(
+            "SELECT title, first_seen, last_seen FROM jobs"
+        ).fetchall()
+        assert got == [("Senior SWE", "2026-01-01T00:00:00+00:00", "2026-02-02T00:00:00+00:00")]
+
+
+def test_db_keeps_grep_context_from_earlier_runs():
+    """A later title-only run must not blank out fragments a --grep run found."""
+    import sqlite3
+    import tempfile
+    from pathlib import Path
+    from ashby_jobs import save
+
+    row = {f: "" for f in FIELDS} | {"id": "job-1", "company": "acme"}
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "t.db"
+        save([row | {"matched": "uses Rust daily"}], db, "2026-01-01T00:00:00+00:00")
+        save([row], db, "2026-02-02T00:00:00+00:00")  # no --grep this time
+        (kept,) = sqlite3.connect(db).execute("SELECT matched FROM jobs").fetchone()
+        assert kept == "uses Rust daily"
+
+
+def test_db_skips_rows_without_an_id():
+    import tempfile
+    from pathlib import Path
+    from ashby_jobs import save
+
+    with tempfile.TemporaryDirectory() as tmp:
+        assert save([{f: "" for f in FIELDS}], Path(tmp) / "t.db", "2026-01-01T00:00:00+00:00") == (0, 0)
+
+
 def test_user_agent_is_header_safe():
     """http.client encodes headers as latin-1; non-ASCII here breaks every request.
 
@@ -193,6 +242,9 @@ if __name__ == "__main__":
     test_fragments_give_context_and_dedupe()
     test_grep_filters_on_description_and_records_context()
     test_invalid_payload_raises_rather_than_returning_nothing()
+    test_db_upsert_preserves_history()
+    test_db_keeps_grep_context_from_earlier_runs()
+    test_db_skips_rows_without_an_id()
     test_user_agent_is_header_safe()
     test_csv_quoting()
     print("ok")

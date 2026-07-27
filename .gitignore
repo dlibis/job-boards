@@ -10,3 +10,7 @@ __pycache__/
 *.csv
 *.json
 !boards.seed.json
+
+# Scrape database.
+*.db
+*.db-journal

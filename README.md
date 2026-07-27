@@ -76,6 +76,46 @@ characteristics below are unchanged by `--grep`.
 Against the shipped 26 boards, `software engineer` returns **268** jobs fuzzy and **2**
 exact — pick accordingly.
 
+## The database
+
+Every run also upserts into `ashby-jobs.db` (SQLite, stdlib, no setup). The CSV is a
+snapshot of one query; the database accumulates across runs and is what lets you ask
+questions a snapshot can't answer.
+
+Rows are keyed on the Ashby posting UUID, with `first_seen` preserved and `last_seen`
+refreshed. Everything else is overwritten each run, since titles and locations do get
+edited in place on live postings. The exception is `matched`: a later title-only run
+won't blank out `--grep` context an earlier search found.
+
+```bash
+uv run ashby_jobs.py --title "software engineer"     # writes ashby-jobs.db
+uv run ashby_jobs.py --db ~/jobs.db                  # somewhere else
+uv run ashby_jobs.py --no-db                         # CSV/JSON only
+```
+
+The run summary reports `N new, M already seen`, so a scheduled scrape tells you what
+changed without diffing anything.
+
+```sql
+-- postings that showed up in the last day
+SELECT company, title, jobUrl FROM jobs
+WHERE first_seen > datetime('now', '-1 day');
+
+-- gone: last seen more than a week ago, so probably filled or pulled
+SELECT company, title, last_seen FROM jobs
+WHERE last_seen < datetime('now', '-7 days') ORDER BY last_seen;
+
+-- who is hiring hardest
+SELECT company, COUNT(*) n FROM jobs GROUP BY company ORDER BY n DESC LIMIT 10;
+
+-- roles whose description mentioned your --grep term, with the context
+SELECT company, title, matched FROM jobs WHERE matched != '';
+```
+
+One caveat on `last_seen`: it only advances when a run's filters actually match the
+posting. A row going stale means "no recent run matched it", which is not quite the same
+as "the job is gone" — compare like-for-like queries if you care about the difference.
+
 ## How it works
 
 Ashby's public API is **per-company**, keyed by a board slug, with no global search

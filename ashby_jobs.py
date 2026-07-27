@@ -16,6 +16,9 @@ filter every board.
     uv run ashby_jobs.py --title engineer --grep "kubernetes"  # both must match
     uv run ashby_jobs.py --refresh-boards
 
+Results go to CSV and JSON, and are also accumulated into a SQLite database keyed on
+the Ashby posting id, so first_seen/last_seen survive across scrapes. See the README.
+
 boards.json ships with the repo, so --refresh-boards is optional. Read the README
 before running it — Common Crawl's index is frequently overloaded.
 
@@ -28,8 +31,10 @@ import gzip
 import json
 import os
 import re
+import sqlite3
 import sys
 import time
+from datetime import datetime, timezone
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -57,11 +62,14 @@ UA = f"ashby-jobs-scraper/1.0 (public posting API; contact: {_CONTACT})".encode(
     "ascii", "ignore"
 ).decode()
 
-FIELDS = [
-    "company", "title", "department", "team", "employmentType",
+# Pulled straight off the Ashby job object. `id` is the posting UUID and is what
+# makes cross-run history possible.
+API_FIELDS = [
+    "id", "title", "department", "team", "employmentType",
     "location", "isRemote", "workplaceType", "publishedAt", "jobUrl",
-    "matched",  # context around --grep hits; empty when --grep is not used
 ]
+# Output columns: the board slug, the API fields, then --grep context (empty without it).
+FIELDS = ["company", *API_FIELDS, "matched"]
 
 _HTML_TAG = re.compile(r"<[^>]+>")
 _SPACE = re.compile(r"\s+")
@@ -259,10 +267,59 @@ def scan_board(
 
         rows.append({
             "company": slug,
-            **{f: job.get(f, "") for f in FIELDS[1:-1]},
+            **{f: job.get(f, "") for f in API_FIELDS},
             "matched": " … ".join(hits),
         })
     return rows
+
+
+_SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS jobs (
+    id          TEXT PRIMARY KEY,
+    {"".join(f"{f} TEXT," for f in FIELDS if f != "id")}
+    first_seen  TEXT NOT NULL,
+    last_seen   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS jobs_company ON jobs(company);
+CREATE INDEX IF NOT EXISTS jobs_last_seen ON jobs(last_seen);
+"""
+
+
+def save(rows: list[dict], db_path: Path, seen_at: str) -> tuple[int, int]:
+    """Upsert rows keyed on the Ashby posting id. Returns (new, updated) counts.
+
+    first_seen is preserved across runs and last_seen is refreshed, which is the
+    whole reason to keep a database rather than just the CSV: it answers "when did
+    this posting appear" and "is it still up" across scrapes.
+    """
+    keyed = {r["id"]: r for r in rows if r.get("id")}
+    cols = ["id", *[f for f in FIELDS if f != "id"]]
+    with sqlite3.connect(db_path) as con:
+        con.executescript(_SCHEMA)
+        known = {row[0] for row in con.execute("SELECT id FROM jobs")}
+        con.executemany(
+            f"INSERT INTO jobs ({','.join(cols)}, first_seen, last_seen) "
+            f"VALUES ({','.join('?' * len(cols))}, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            # Everything except first_seen is refreshed; titles and locations do
+            # get edited in place on live postings. `matched` is the exception: it
+            # belongs to whichever --grep produced it, so a later title-only run
+            # must not blank out context an earlier search found.
+            + ",".join(
+                f"{c}=excluded.{c}"
+                for c in cols
+                if c not in ("id", "matched")
+            )
+            + ", matched=CASE WHEN excluded.matched != '' "
+            "THEN excluded.matched ELSE jobs.matched END"
+            ", last_seen=excluded.last_seen",
+            [
+                [str(r.get(c, "")) for c in cols] + [seen_at, seen_at]
+                for r in keyed.values()
+            ],
+        )
+    new = len(keyed.keys() - known)
+    return new, len(keyed) - new
 
 
 def main() -> None:
@@ -290,6 +347,12 @@ def main() -> None:
     p.add_argument("--concurrency", type=int, default=8)
     p.add_argument("--refresh-boards", action="store_true", help="re-crawl slug list")
     p.add_argument("--out", default="ashby-jobs", help="output filename prefix")
+    p.add_argument(
+        "--db",
+        default="ashby-jobs.db",
+        help="SQLite file accumulating every scrape (default: ashby-jobs.db)",
+    )
+    p.add_argument("--no-db", action="store_true", help="skip the database write")
     args = p.parse_args()
 
     # The title default only applies when nothing else narrows the search. Applying
@@ -360,7 +423,14 @@ def main() -> None:
     if dead and not args.limit:
         BOARDS_CACHE.write_text(json.dumps([b for b in boards if b not in dead], indent=2))
 
-    print(f"\n{len(rows)} jobs -> {csv_path.name}, {json_path.name}", file=sys.stderr)
+    written = f"{csv_path.name}, {json_path.name}"
+    if not args.no_db:
+        seen_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        db_path = HERE / args.db if not Path(args.db).is_absolute() else Path(args.db)
+        new, updated = save(rows, db_path, seen_at)
+        written += f", {db_path.name} ({new} new, {updated} already seen)"
+
+    print(f"\n{len(rows)} jobs -> {written}", file=sys.stderr)
 
 
 if __name__ == "__main__":
