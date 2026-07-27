@@ -1,10 +1,12 @@
 __pycache__/
 *.pyc
 
-# Scrape output — regenerated on every run, not shared state.
-ashby-jobs.csv
-ashby-jobs.json
-
-# Crawl output. Can contain every Ashby customer (~3,400) — never commit it.
-# The committed starter list is boards.seed.json.
-boards.json
+# Nothing this tool writes belongs in the repo, and --out lets you name the output
+# anything, so deny by default and allow the one file that is genuinely source.
+#
+# boards.json in particular: a full --refresh-boards crawl discovers ~3,400 slugs,
+# which is effectively Ashby's customer list. Committing it would turn a scraping
+# tool into published competitive intelligence.
+*.csv
+*.json
+!boards.seed.json
