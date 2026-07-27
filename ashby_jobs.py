@@ -34,6 +34,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 HERE = Path(__file__).parent
+# Two files on purpose. The seed is small, curated and committed, so a fresh clone
+# works without touching Common Crawl. The cache is whatever the last crawl produced
+# — potentially every Ashby customer — and is gitignored, so a full crawl never turns
+# this repo into a published customer list.
+BOARDS_SEED = HERE / "boards.seed.json"
 BOARDS_CACHE = HERE / "boards.json"
 POSTING_API = "https://api.ashbyhq.com/posting-api/job-board/{slug}"
 COLLINFO = "https://index.commoncrawl.org/collinfo.json"
@@ -135,8 +140,12 @@ def discover_boards(max_pages: int = 20) -> list[str]:
 
 
 def load_boards(refresh: bool) -> list[str]:
-    if BOARDS_CACHE.exists() and not refresh:
-        return json.loads(BOARDS_CACHE.read_text())
+    if not refresh:
+        for path in (BOARDS_CACHE, BOARDS_SEED):
+            if path.exists():
+                boards = json.loads(path.read_text())
+                print(f"{len(boards)} boards from {path.name}", file=sys.stderr)
+                return boards
     try:
         boards = discover_boards()
     except RateLimited:

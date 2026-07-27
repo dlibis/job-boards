@@ -7,8 +7,9 @@
 
 import csv
 import io
+import json
 
-from ashby_jobs import FIELDS, matches, slug_from_url
+from ashby_jobs import FIELDS, matches, scan_board, slug_from_url
 
 
 def test_slug_parsing():
@@ -48,6 +49,56 @@ def test_exact_matching():
     assert not matches("Software Engineer", "senior software engineer", "exact")
 
 
+def test_cdx_jsonl_parsing():
+    """Common Crawl returns JSONL, not a JSON array, and mixes in junk paths.
+
+    Covered by fixture because the live CDX index is frequently down — see README.
+    """
+    payload = "\n".join([
+        '{"url": "https://jobs.ashbyhq.com/ramp/abc-123?ref=x"}',
+        '{"url": "https://jobs.ashbyhq.com/Ramp/def-456"}',       # dupe, other casing
+        '{"url": "https://jobs.ashbyhq.com/A1%20Garage%20Door/x"}',  # spaces in slug
+        "",                                                        # blank line
+        '{"url": "https://jobs.ashbyhq.com/_next/static/z.js"}',   # junk, 404s later
+        '{"url": "https://jobs.ashbyhq.com/"}',                    # no slug at all
+    ])
+    seen = {}
+    for line in payload.splitlines():
+        if not line.strip():
+            continue
+        slug = slug_from_url(json.loads(line)["url"])
+        if slug:
+            seen.setdefault(slug.lower(), slug)
+    assert sorted(seen.values()) == ["A1 Garage Door", "_next", "ramp"]
+    assert seen["ramp"] == "ramp"  # first-seen casing wins over "Ramp"
+
+
+def test_scan_board_filters_and_flattens(monkeypatched_fetch=None):
+    """isListed/remote filtering, and that descriptions never reach the output."""
+    board = {"jobs": [
+        {"title": "Software Engineer", "isListed": True, "isRemote": True,
+         "location": "Remote", "descriptionHtml": "<p>huge</p>",
+         "descriptionPlain": "huge", "jobUrl": "u1"},
+        {"title": "Software Engineer", "isListed": False, "isRemote": True},  # unlisted
+        {"title": "Chef", "isListed": True, "isRemote": True},                # no match
+        {"title": "Software Engineer II", "isListed": True, "isRemote": False},  # onsite
+    ]}
+    import ashby_jobs
+    original = ashby_jobs.fetch
+    ashby_jobs.fetch = lambda *a, **k: json.dumps(board).encode()
+    try:
+        rows = scan_board("acme", "software engineer", False, "fuzzy")
+        remote = scan_board("acme", "software engineer", True, "fuzzy")
+    finally:
+        ashby_jobs.fetch = original
+
+    assert [r["title"] for r in rows] == ["Software Engineer", "Software Engineer II"]
+    assert [r["title"] for r in remote] == ["Software Engineer"]
+    assert rows[0]["company"] == "acme"
+    assert set(rows[0]) == set(FIELDS), "row must be exactly the declared columns"
+    assert not any("escription" in k for k in rows[0]), "descriptions must be dropped"
+
+
 def test_csv_quoting():
     """stdlib csv handles RFC4180 escaping — this pins that it stays correct."""
     buf = io.StringIO()
@@ -69,5 +120,7 @@ if __name__ == "__main__":
     test_fuzzy_does_not_match_generic_one_word_titles()
     test_empty_query_matches_nothing()
     test_exact_matching()
+    test_cdx_jsonl_parsing()
+    test_scan_board_filters_and_flattens()
     test_csv_quoting()
     print("ok")

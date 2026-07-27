@@ -4,3 +4,7 @@ __pycache__/
 # Scrape output — regenerated on every run, not shared state.
 ashby-jobs.csv
 ashby-jobs.json
+
+# Crawl output. Can contain every Ashby customer (~3,400) — never commit it.
+# The committed starter list is boards.seed.json.
+boards.json
