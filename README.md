@@ -71,8 +71,9 @@ Measured by a real `--refresh-boards --all`, not estimated:
 | Lever | 2,718 | 2,113 | 72,594 |
 | **total** | **13,132** | **11,062** | **308,100** |
 
-A full `--refresh-boards --all` took **26 minutes** — most of it discovery, which later
-runs skip. Note the board/company gap: ~2,000 boards are real customers with nothing
+A full `--refresh-boards --all` took **26 minutes** measured before connection pooling —
+most of it discovery, which later runs skip. The scrape half of that is now 41% faster
+(see [Performance](#performance)); the discovery half has not been re-timed since. Note the board/company gap: ~2,000 boards are real customers with nothing
 currently listed, which is expected and not an error.
 
 So it gets **every listed job on every board it knows about**. The honest limit is the
@@ -119,7 +120,7 @@ uv run job_boards.py --all --new-only     # never seen by the database before
 uv run job_boards.py --all --since 30d --new-only
 ```
 
-**Today's jobs, today.** `--since 1d` over all 13,146 boards takes about 6½ minutes and
+**Today's jobs, today.** `--since 1d` over all 13,146 boards takes about **3m51s** and
 returned **5,980 postings** on a real run — 133 of them published within the previous
 hour, the freshest **6 minutes old**. Pair it with `--sort recent` so the newest are at
 the top; the default `--sort board` groups by platform and company, which buries them.
@@ -134,7 +135,7 @@ the top; the default `--sort board` groups by platform and company, which buries
 
 None of the three APIs support server-side date filtering — `updated_after` and friends
 are silently ignored, verified against all three — so every board is fetched and the
-window is applied locally. 6½ minutes is therefore the floor for a full sweep, and the
+window is applied locally. ~4 minutes is therefore the floor for a full sweep, and the
 only way to see a posting sooner is to run more often.
 
 `--since` accepts `7d`, `2w`, `3m`, `1y`, or a bare number of days:
@@ -187,7 +188,7 @@ Wayback crawl had missed, including `headway`, `lab37` and `eltropyinc`.
 |---|---|---|
 | Wayback | full crawl, 2.9M URLs | last 30 days only, ~17k URLs |
 | urlscan.io | — | recent public scans |
-| runtime | ~26 min | **~4 min** |
+| runtime | ~26 min | **~4 min** | (both pre-pooling)
 | cadence | monthly | daily |
 
 ```bash
@@ -486,8 +487,8 @@ unrunnable without trying it.
 
 The test suite is the fast feedback loop — it covers every filter, all three normalisers,
 the SQLite lifecycle and the archive-parsing paths without touching the network. Run it
-before and after any change. A full `--refresh-boards --all` spans 13,132 boards across
-three platforms and takes ~26 minutes; do not run it casually, and never in a loop. `--ats <one> --limit 10` is
+before and after any change. A full `--refresh-boards --all` spans 13,146 boards across
+three platforms and takes tens of minutes; do not run it casually, and never in a loop. `--ats <one> --limit 10` is
 the cheap way to exercise a real request path.
 
 **Things that look like bugs but are load-bearing.** Each is pinned by a test; if you

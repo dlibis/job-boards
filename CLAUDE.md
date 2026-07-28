@@ -28,8 +28,8 @@ run. Both print `ok` on success.
 
 ## Do not run casually
 
-`--refresh-boards` and `--all` are live network operations across 13,132 boards on three
-platforms, taking ~26 minutes. Never in a loop. Everything you need to verify a code
+`--refresh-boards` and `--all` are live network operations across 13,146 boards on three
+platforms, taking tens of minutes. Never in a loop. Everything you need to verify a code
 change is covered by the offline suite. `--limit 10` plus `--ats <one>` is the cheap way
 to exercise a real request path.
 
@@ -45,6 +45,24 @@ runs, not how narrow the filter is.
 
 `--grep` on Greenhouse requests full job descriptions, which is roughly **26x** the
 bytes of a normal run. Do not add it casually to an unlimited run.
+
+## Performance: what to change and what not to
+
+This tool is network-bound. Parsing and normalisation are **0.2%** of a run, so
+optimising them is wasted effort. Only round trips and connections matter.
+
+Connections are pooled per thread against the three posting-API hosts, which took a full
+run from 6m35s to 3m51s. Two consequences:
+
+- **Add a new ATS host to `_POOLED_HOSTS`**, or it silently opts out of that. A test
+  enforces this.
+- **Read headers in lowercase.** The pooled path returns a plain dict, unlike urlopen's
+  case-insensitive `Message`. These APIs already disagree — ashby and greenhouse send
+  `etag`, lever sends `ETag` — and a case-sensitive lookup for `Content-Encoding` would
+  return gzip bytes as if they were JSON.
+
+**Do not raise `--concurrency` to make something faster.** It is the one lever that works
+by moving cost onto Ashby, Greenhouse and Lever. 8 is a requirement, not a tunable.
 
 ## If you add a filter, update `may_close_postings()`
 
