@@ -64,18 +64,26 @@ run from 6m35s to 3m51s. Two consequences:
 **Do not raise `--concurrency` to make something faster.** It is the one lever that works
 by moving cost onto Ashby, Greenhouse and Lever. 8 is a requirement, not a tunable.
 
-## If you add a filter, update `may_close_postings()`
+## If you add a filter, update BOTH gates
 
-This is the single most damaging thing to get wrong in this codebase.
+Two functions in `job_boards.py` decide what a run is entitled to conclude. A new filter
+missing from either produces a normal-looking run that quietly corrupts data. These are
+the single most damaging things to get wrong here.
 
-`closed_at` asserts a posting is gone. Only a run that saw every posting on a board may
-set it, so every narrowing flag — `--title`, `--grep`, `--since`, `--new-only` — has to be
-listed in `may_close_postings()` in `job_boards.py`. A filter missing from it means a
-perfectly normal-looking run silently marks huge numbers of live postings as closed:
-`--all --since 7d` would close everything older than a week.
+**`may_close_postings()`** — `closed_at` asserts a posting is gone. Only a run that saw
+every posting on a board may set it. A filter missing from this list means
+`--all --since 7d` marks everything older than a week as closed.
+Pinned by `test_only_an_unfiltered_run_may_close_postings`.
 
-It is pinned by `test_only_an_unfiltered_run_may_close_postings`. Add your filter to both
-in the same change.
+**`may_use_etags()`** — a `304` says the body is unchanged, and treating that as "no new
+postings" also requires that the fetch which stored the ETag persisted *every* posting. A
+filter missing from this list means a `--title` run stores an ETag after saving matching
+rows only; a later run then skips that board on `304`, so its other postings stay
+invisible even once a query matches them.
+Pinned by `test_etags_are_only_trusted_on_an_unfiltered_run`.
+
+Both fail silently and permanently. Add your filter to both functions and both tests in
+the same change.
 
 Set `JOB_SCRAPER_CONTACT` to a real address before any network run. Ask for one;
 do not invent it.

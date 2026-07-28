@@ -845,16 +845,18 @@ def test_agent_instructions_do_not_diverge():
     )
 
 
-def test_the_closing_rule_is_documented_where_agents_will_see_it():
-    """The one mistake that corrupts data silently, so it must be findable.
+def test_both_filter_gates_are_documented_where_agents_will_see_them():
+    """The two mistakes that corrupt data silently, so both must be findable.
 
-    A filter missing from may_close_postings() makes an ordinary-looking run
-    assert that live postings are gone. Agents add filters; they read AGENTS.md.
+    A filter missing from may_close_postings() makes a run assert that live postings
+    are gone. A filter missing from may_use_etags() makes a later run skip a board
+    whose postings were never persisted. Agents add filters; they read AGENTS.md.
     """
     here = Path(__file__).parent
-    for name in ("AGENTS.md", "README.md"):
-        assert "may_close_postings" in (here / name).read_text(), \
-            f"{name} must tell a contributor to update may_close_postings()"
+    agents = (here / "AGENTS.md").read_text()
+    for gate in ("may_close_postings", "may_use_etags"):
+        assert gate in agents, f"AGENTS.md must tell a contributor to update {gate}()"
+    assert "may_close_postings" in (here / "README.md").read_text()
 
 
 def test_user_agent_is_header_safe():
