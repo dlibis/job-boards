@@ -36,15 +36,49 @@ to exercise a real request path.
 `--refresh-recent` is the cheap discovery pass (~4 minutes) and `--since 7d` narrows to
 recent postings — still live network calls, so the same rules apply.
 
-For a freshest-first feed, `--since 1d --sort recent` is the pairing that matters:
-`--sort` defaults to `board`, which groups by platform and company and buries the newest
-postings in the middle of the file. Note that no platform supports server-side date
-filtering, so `--since` never makes a run cheaper — every board is fetched in full and
-the window is applied locally. Latency to a new posting depends on how often the scraper
-runs, not how narrow the filter is.
-
 `--grep` on Greenhouse requests full job descriptions, which is roughly **26x** the
 bytes of a normal run. Do not add it casually to an unlimited run.
+
+## Freshness: the fetch is live, the postings are not
+
+Every run reads the platform APIs directly, so nothing is served from a cache. The
+postings themselves are old: the median in a full pull is **62 days**, because companies
+leave requisitions listed. It skews hard by platform, so "how stale is this row" depends
+on which ATS it came from:
+
+| ats | jobs | median age | >1yr |
+|---|---|---|---|
+| ashby | 54,591 | 48d | 3.9% |
+| greenhouse | 180,915 | 60d | 13.0% |
+| lever | 72,594 | **97d** | **26.2%** |
+| **all** | 308,100 | **62d** | 15.6% |
+
+**Lever's tail is upstream reality, not a parsing bug.** Palantir's board carries a
+posting with `createdAt` **2009-12-05**, verified against the raw API. Do not "fix" a
+normaliser because its dates look implausible — check the API response first.
+
+You cannot lower the age of what exists, only choose what to collect, and the two flags
+catch different things:
+
+- **`--since 1d --sort recent`** is the freshest-first pairing that matters. A real run
+  returned **5,980** postings from the last 24 hours, 133 within the previous hour, the
+  freshest **6 minutes old**. `--sort` defaults to `board`, which groups by platform and
+  company and buries the newest postings in the middle of the file. `--since 7d` gives
+  35,490 rows at a 4-day median.
+- **`--new-only`** is about the database, not the calendar: postings never seen before,
+  at any age. It catches the 200-day-old requisition that appeared on a board today,
+  which `--since` cannot. It compares `(ats, id)` keys, so it errors with `--no-db`.
+
+No platform supports server-side date filtering — `updated_after` and friends are
+silently ignored on all three — so `--since` never makes a run cheaper. Every board is
+fetched in full and the window is applied locally. **Latency to a new posting is set by
+how often the scraper runs, not how narrow the filter is**; ~4 minutes is the floor for a
+full sweep.
+
+Board *discovery* lags separately, by a median of **48 days**: a company is invisible
+until the Internet Archive crawls its board, which `--refresh-recent` shortens via
+urlscan.io. That is a one-time cost per company, not a staleness tax on jobs — for the
+~13,000 already-known boards it is paid.
 
 ## Performance: what to change and what not to
 
