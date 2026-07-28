@@ -4,7 +4,7 @@ Pull every public job posting from every **Ashby, Greenhouse and Lever** job boa
 No API key, no account, no dependencies.
 
 All three publish an unauthenticated posting API that is per-company, keyed by a board
-slug, with no global search endpoint. This finds the boards — **13,132** of them across
+slug, with no global search endpoint. This finds the boards — **13,146** of them across
 the three platforms — then fans out across all of them. **~308,000 live postings.**
 
 > **Engineers and coding agents:** the [`openwiki/`](openwiki/quickstart.md) wiki is the
@@ -70,6 +70,10 @@ Measured by a real `--refresh-boards --all`, not estimated:
 | Greenhouse | 6,797 | 5,660 | 180,915 |
 | Lever | 2,718 | 2,113 | 72,594 |
 | **total** | **13,132** | **11,062** | **308,100** |
+
+That is the `--refresh-boards` figure; [`--refresh-recent`](#closing-the-discovery-gap---refresh-recent)
+has since taken the cached board list to **13,146**, which is the count the runtimes below
+are measured over.
 
 A full `--refresh-boards --all` took **26 minutes** measured before connection pooling —
 most of it discovery, which later runs skip. The scrape half of that is now 41% faster
@@ -157,6 +161,20 @@ on a board today, or one on a board you only just discovered. It compares agains
 out, so it cannot conclude those postings are gone — the same rule that already applies to
 `--title` and `--grep`. Without it, one `--all --since 7d` would close everything older
 than a week.
+
+**They also differ in what they cost the platforms.** `--all --new-only` is the one
+combination that may send `If-None-Match`, so an unchanged board transfers nothing at all
+([conditional requests](#conditional-requests-on---all---new-only)). Adding `--since`
+turns that off — `may_use_etags()` requires a run that is unfiltered apart from
+`--new-only` — so every `--since` run re-downloads all 13,146 boards in full. If you are
+scraping on a schedule and want the cheap pass, run `--all --new-only` and apply the date
+window to the database afterwards:
+
+```sql
+SELECT company, title, jobUrl FROM jobs
+WHERE first_seen > datetime('now', '-1 day')
+ORDER BY publishedAt DESC;
+```
 
 **Board discovery lags by ~48 days.** Separately from posting age: a company that adopts
 any of these platforms is invisible until the Internet Archive crawls its board. Comparing
@@ -507,6 +525,9 @@ the cheap way to exercise a real request path.
 | Validation uses `HEAD`, not `GET` | `GET` would download hundreds of KB per board — gigabytes per refresh |
 | The User-Agent is stripped to ASCII | HTTP headers are latin-1; one em-dash made *every* request fail |
 | `boards.json` is gitignored, `boards.seed.json` is committed | A full crawl is effectively three vendors' customer lists and must not be published |
+| Only `--all --new-only` sends `If-None-Match` | A `304` means "body unchanged", which is only "no new postings" if the fetch that stored the ETag persisted every posting |
+| Response headers are read in lowercase | The pooled path returns a plain dict, not urlopen's case-insensitive `Message` — and Lever sends `ETag` where the others send `etag` |
+| Lever postings dated 2009 are kept | Upstream data, not a parse error. Palantir's board really does carry a `createdAt` of `2009-12-05` |
 
 **Do not commit:** `boards.json`, `*.csv`, `*.json` outputs, `*.db`. `.gitignore` denies
 these by default and allows only `boards.seed.json`. If you add an output format, add it
@@ -519,11 +540,21 @@ README and let OpenWiki regenerate them (`openwiki --update`).
 8, Common Crawl is throttled to its stated 1 request/second, and every request identifies
 itself. Do not raise these to make something finish faster.
 
-**If you add a filter,** add it to `may_close_postings()` in the same change. That one
-function decides whether a run is entitled to mark postings closed, and a filter missing
-from it silently corrupts the fill-rate signal — `--all --since 7d` would close every
-posting older than a week. It is pinned by
-`test_only_an_unfiltered_run_may_close_postings`.
+**If you add a platform, add its posting-API host to `_POOLED_HOSTS`.** Connection
+pooling is opt-in per host, so a new host silently keeps opening a fresh TLS connection
+per request — no error, just the pre-pooling cost back for that platform. Pinned by
+`test_every_posting_api_host_is_pooled`. Optimising the parsing is not worth doing at
+all: it is 0.2% of a run.
+
+**If you add a filter, update both gates.** Two functions decide what a run is entitled
+to conclude, and a filter missing from either produces a normal-looking run that quietly
+corrupts data. Both fail silently and permanently, so add your filter to both functions
+and both tests in the same change.
+
+| gate | what it decides | what a missing filter does |
+|---|---|---|
+| `may_close_postings()` | may this run stamp `closed_at`? | `--all --since 7d` closes every posting older than a week — the fill-rate signal is corrupted. Pinned by `test_only_an_unfiltered_run_may_close_postings` |
+| `may_use_etags()` | may this run store and trust a `304`? | a `--title` run stores an ETag after saving matching rows only; a later run skips that board on `304`, so its other postings stay invisible even once a query matches them. Pinned by `test_etags_are_only_trusted_on_an_unfiltered_run` |
 
 **If you are adding a search mode,** note that `--grep` patterns without `\b` are a
 documented footgun (`rust` matches "t**rust**": 1350 hits vs 72). The script warns about
