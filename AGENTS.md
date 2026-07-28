@@ -36,6 +36,13 @@ to exercise a real request path.
 `--refresh-recent` is the cheap discovery pass (~4 minutes) and `--since 7d` narrows to
 recent postings — still live network calls, so the same rules apply.
 
+For a freshest-first feed, `--since 1d --sort recent` is the pairing that matters:
+`--sort` defaults to `board`, which groups by platform and company and buries the newest
+postings in the middle of the file. Note that no platform supports server-side date
+filtering, so `--since` never makes a run cheaper — every board is fetched in full and
+the window is applied locally. Latency to a new posting depends on how often the scraper
+runs, not how narrow the filter is.
+
 `--grep` on Greenhouse requests full job descriptions, which is roughly **26x** the
 bytes of a normal run. Do not add it casually to an unlimited run.
 
