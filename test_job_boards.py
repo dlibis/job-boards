@@ -111,8 +111,11 @@ def test_every_posting_api_host_is_pooled():
     """
     import urllib.parse
     from job_boards import SOURCES, _POOLED_HOSTS, board_url
-    for ats in ("ashby", "greenhouse", "lever"):
-        host = urllib.parse.urlsplit(board_url(ats, "example")).netloc
+    metadata = {"company_uid": "acme", "public_token": "token"}
+    for ats in SOURCES:
+        host = urllib.parse.urlsplit(
+            board_url(ats, "example", comeet_metadata=metadata if ats == "comeet" else None)
+        ).netloc
         assert host in _POOLED_HOSTS, f"{ats} posting API host {host} is not pooled"
 
 
@@ -126,9 +129,17 @@ def test_comeet_uses_caller_metadata_without_a_metadata_file():
 
 def test_comeet_normalization_and_dispatch_boundary_are_offline():
     import job_boards as jb
-    payload = {"positions": [{"uid": "position-1", "name": "Developer", "location": "Tel Aviv"}]}
+    payload = {"positions": [{
+        "uid": "position-1", "name": "Developer", "location": {"city": "Tel Aviv"},
+        "publicUrl": "https://www.comeet.com/jobs/position-1",
+    }]}
     row = normalize_comeet(payload["positions"][0])
-    assert row and row["id"] == "position-1"
+    assert row == {
+        "id": "position-1", "title": "Developer", "department": "", "team": "",
+        "employmentType": "", "location": "Tel Aviv", "isRemote": False,
+        "workplaceType": "", "publishedAt": "",
+        "jobUrl": "https://www.comeet.com/jobs/position-1", "_description": "",
+    }
     original = jb.fetch
     jb.fetch = lambda *_args, **_kwargs: json.dumps(payload).encode()
     try:
@@ -136,7 +147,7 @@ def test_comeet_normalization_and_dispatch_boundary_are_offline():
             "comeet", "acme", comeet_metadata={"company_uid": "acme", "public_token": "token"}
         )
         assert outcome.status == "succeeded"
-        assert outcome.exhaustive is True
+        assert outcome.exhaustive is False
         assert len(outcome.rows) == 1
     finally:
         jb.fetch = original

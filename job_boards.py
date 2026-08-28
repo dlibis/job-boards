@@ -116,6 +116,7 @@ _POOLED_HOSTS = {
     "api.ashbyhq.com",
     "boards-api.greenhouse.io",
     "api.lever.co",
+    "www.comeet.com",
 }
 # One connection per thread per host. Sharing across threads would need a lock and
 # serialise the pool; a thread-local dict keeps the 8 workers independent, so a full
@@ -368,6 +369,7 @@ SOURCES = {
         # Ashby returns descriptions whether or not we want them.
         "content_param": None,
         "junk_prefixes": ("root.",),
+        "exhaustive": True,
     },
     "greenhouse": {
         "domains": ["boards.greenhouse.io", "job-boards.greenhouse.io"],
@@ -378,6 +380,7 @@ SOURCES = {
         # per board, measured), so they are requested only when --grep needs them.
         "content_param": "content=true",
         "junk_prefixes": (),
+        "exhaustive": True,
     },
     "lever": {
         "domains": ["jobs.lever.co"],
@@ -387,6 +390,7 @@ SOURCES = {
         "normalize": normalize_lever,
         "content_param": None,
         "junk_prefixes": (),
+        "exhaustive": True,
     },
     "comeet": {
         "domains": [],
@@ -395,6 +399,9 @@ SOURCES = {
         "normalize": normalize_comeet,
         "content_param": None,
         "junk_prefixes": (),
+        # Until the public API's pagination contract is verified live, its rows
+        # must not qualify as complete-snapshot evidence for lifecycle closure.
+        "exhaustive": False,
     },
 }
 
@@ -814,7 +821,7 @@ def dispatch_board(
         rows = scan_board(
             ats, slug, None, False, "fuzzy", comeet_metadata=comeet_metadata
         )
-        return ProviderDispatch("succeeded", True, tuple(rows))
+        return ProviderDispatch("succeeded", SOURCES[ats]["exhaustive"], tuple(rows))
     except NotFound:
         return ProviderDispatch("not_found", False, ())
     except Exception:
