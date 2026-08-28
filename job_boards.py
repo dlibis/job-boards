@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from dataclasses import dataclass
 import gzip
 import http.client
 import json
@@ -338,6 +339,26 @@ def normalize_lever(job: dict) -> dict | None:
     }
 
 
+def normalize_comeet(job: dict) -> dict | None:
+    """Normalize Comeet's public position shape into the existing native fields."""
+    location = job.get("location") or ""
+    if isinstance(location, dict):
+        location = location.get("name") or location.get("city") or ""
+    return {
+        "id": str(job.get("uid") or job.get("id") or ""),
+        "title": job.get("name") or job.get("title") or "",
+        "department": (job.get("department") or {}).get("name", "") if isinstance(job.get("department"), dict) else job.get("department") or "",
+        "team": "",
+        "employmentType": job.get("employmentType") or "",
+        "location": str(location),
+        "isRemote": bool(job.get("isRemote")),
+        "workplaceType": job.get("workplaceType") or "",
+        "publishedAt": job.get("publishedAt") or "",
+        "jobUrl": job.get("url") or job.get("publicUrl") or "",
+        "_description": job.get("description") or "",
+    }
+
+
 SOURCES = {
     "ashby": {
         "domains": ["jobs.ashbyhq.com"],
@@ -367,6 +388,14 @@ SOURCES = {
         "content_param": None,
         "junk_prefixes": (),
     },
+    "comeet": {
+        "domains": [],
+        "api": "https://www.comeet.com/careers-api/2.0/company/{company_uid}/positions?token={public_token}",
+        "jobs": lambda payload: payload.get("positions") if isinstance(payload, dict) else None,
+        "normalize": normalize_comeet,
+        "content_param": None,
+        "junk_prefixes": (),
+    },
 }
 
 
@@ -379,8 +408,18 @@ def _clean(row: dict) -> dict:
     }
 
 
-def board_url(ats: str, slug: str, want_content: bool = False) -> str:
-    url = SOURCES[ats]["api"].format(slug=urllib.parse.quote(slug))
+def board_url(
+    ats: str, slug: str, want_content: bool = False, comeet_metadata: dict | None = None
+) -> str:
+    if ats == "comeet":
+        if not comeet_metadata:
+            raise ValueError("Comeet board metadata is required")
+        url = SOURCES[ats]["api"].format(
+            company_uid=urllib.parse.quote(str(comeet_metadata["company_uid"])),
+            public_token=urllib.parse.quote(str(comeet_metadata["public_token"])),
+        )
+    else:
+        url = SOURCES[ats]["api"].format(slug=urllib.parse.quote(slug))
     param = SOURCES[ats]["content_param"]
     if want_content and param:
         url += ("&" if "?" in url else "?") + param
@@ -700,6 +739,7 @@ def scan_board(
     cutoff: datetime | None = None,
     etag: str | None = None,
     meta: dict | None = None,
+    comeet_metadata: dict | None = None,
 ) -> list[dict]:
     """Fetch one board, return flat rows for matching listed jobs.
 
@@ -710,7 +750,11 @@ def scan_board(
     """
     source = SOURCES[ats]
     payload = json.loads(
-        fetch(board_url(ats, slug, want_content=pattern is not None), etag=etag, meta=meta)
+        fetch(
+            board_url(ats, slug, want_content=pattern is not None, comeet_metadata=comeet_metadata),
+            etag=etag,
+            meta=meta,
+        )
     )
     jobs = source["jobs"](payload)
     if not isinstance(jobs, list):
@@ -749,6 +793,32 @@ def scan_board(
         norm.pop("_description", None)
         rows.append({"ats": ats, "company": slug, **norm, "matched": " … ".join(hits)})
     return rows
+
+
+@dataclass(frozen=True)
+class ProviderDispatch:
+    """One provider-dispatch fact, captured without changing provider behavior."""
+
+    status: str
+    exhaustive: bool
+    rows: tuple[dict, ...]
+    http_status: int | None = None
+    error_message: str | None = None
+
+
+def dispatch_board(
+    ats: str, slug: str, *, comeet_metadata: dict | None = None
+) -> ProviderDispatch:
+    """Run existing board collection once and return a sanitized in-process fact."""
+    try:
+        rows = scan_board(
+            ats, slug, None, False, "fuzzy", comeet_metadata=comeet_metadata
+        )
+        return ProviderDispatch("succeeded", True, tuple(rows))
+    except NotFound:
+        return ProviderDispatch("not_found", False, ())
+    except Exception:
+        return ProviderDispatch("failed", False, (), error_message="collector request failed")
 
 
 # --------------------------------------------------------------------------- #

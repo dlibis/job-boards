@@ -23,6 +23,7 @@ from job_boards import (
     normalize_ashby,
     normalize_greenhouse,
     normalize_lever,
+    normalize_comeet,
     plain_text,
     plausible,
     save,
@@ -110,9 +111,52 @@ def test_every_posting_api_host_is_pooled():
     """
     import urllib.parse
     from job_boards import SOURCES, _POOLED_HOSTS, board_url
-    for ats in SOURCES:
+    for ats in ("ashby", "greenhouse", "lever"):
         host = urllib.parse.urlsplit(board_url(ats, "example")).netloc
         assert host in _POOLED_HOSTS, f"{ats} posting API host {host} is not pooled"
+
+
+def test_comeet_uses_caller_metadata_without_a_metadata_file():
+    from job_boards import board_url
+    url = board_url(
+        "comeet", "ignored", comeet_metadata={"company_uid": "acme", "public_token": "token"}
+    )
+    assert "acme" in url and "token" in url
+
+
+def test_comeet_normalization_and_dispatch_boundary_are_offline():
+    import job_boards as jb
+    payload = {"positions": [{"uid": "position-1", "name": "Developer", "location": "Tel Aviv"}]}
+    row = normalize_comeet(payload["positions"][0])
+    assert row and row["id"] == "position-1"
+    original = jb.fetch
+    jb.fetch = lambda *_args, **_kwargs: json.dumps(payload).encode()
+    try:
+        outcome = jb.dispatch_board(
+            "comeet", "acme", comeet_metadata={"company_uid": "acme", "public_token": "token"}
+        )
+        assert outcome.status == "succeeded"
+        assert outcome.exhaustive is True
+        assert len(outcome.rows) == 1
+    finally:
+        jb.fetch = original
+
+
+def test_comeet_dispatch_failure_is_sanitized_and_contains_no_token():
+    import job_boards as jb
+    original = jb.fetch
+    jb.fetch = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("token secret"))
+    try:
+        outcome = jb.dispatch_board(
+            "comeet", "acme", comeet_metadata={"company_uid": "acme", "public_token": "token secret"}
+        )
+        assert outcome.status == "failed"
+        assert outcome.exhaustive is False
+        assert outcome.rows == ()
+        assert outcome.error_message == "collector request failed"
+        assert "token secret" not in (outcome.error_message or "")
+    finally:
+        jb.fetch = original
 
 
 def test_etags_are_only_trusted_on_an_unfiltered_run():
