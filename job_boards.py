@@ -383,6 +383,7 @@ def normalize_comeet(job: dict) -> dict | None:
 
 SOURCES = {
     "ashby": {
+        "board_page": "https://jobs.ashbyhq.com/{slug}",
         "domains": ["jobs.ashbyhq.com"],
         "api": "https://api.ashbyhq.com/posting-api/job-board/{slug}",
         "jobs": lambda payload: payload.get("jobs"),
@@ -392,6 +393,7 @@ SOURCES = {
         "junk_prefixes": ("root.",),
     },
     "greenhouse": {
+        "board_page": "https://job-boards.greenhouse.io/{slug}",
         # The *.eu.* pair is Greenhouse's EU-region board host, mirroring the US
         # pair: boards.eu -> job-boards.eu, exactly as boards -> job-boards. Only
         # the public board page is regionalised — there is no
@@ -417,6 +419,7 @@ SOURCES = {
         "junk_prefixes": (),
     },
     "lever": {
+        "board_page": "https://jobs.lever.co/{slug}",
         "domains": ["jobs.lever.co"],
         "api": "https://api.lever.co/v0/postings/{slug}?mode=json",
         # Lever's payload IS the list; there is no wrapper object.
@@ -642,6 +645,67 @@ def discover_boards(ats: str, concurrency: int = 8, recent_days: int | None = No
 
 
 # --------------------------------------------------------------------------- #
+# Company metadata
+#
+# The posting APIs carry jobs, not the company behind them: a board is addressed
+# by slug, and a slug is frequently not the brand (`residenthome` is Ashley
+# Digital). The public board page does carry both, in its Open Graph tags, so
+# this reads it once per board at discovery. It is deliberately not part of a
+# scan: a company renames or changes its logo perhaps yearly, and paying a
+# request per board on every run would cost thousands for data that never moved.
+# --------------------------------------------------------------------------- #
+
+# "Linear Jobs" -> Linear, "Palantir Technologies jobs" -> Palantir Technologies,
+# "Jobs at Ashley Digital" / "Job opportunities at ScyllaDB" -> the company.
+_BOARD_NAME_SUFFIX = re.compile(r"\s+jobs\s*$", re.IGNORECASE)
+_BOARD_NAME_PREFIX = re.compile(r"^\s*jobs?\s+(?:opportunities\s+)?at\s+", re.IGNORECASE)
+_META_CONTENT = '[\'"]{property}[\'"][^>]*content=[\'"]([^\'"]+)'
+_PAGE_TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+
+def _meta(html: str, prop: str) -> str | None:
+    match = re.search(_META_CONTENT.format(property=re.escape(prop)), html, re.IGNORECASE)
+    return unescape(match.group(1)).strip() if match else None
+
+
+def company_name_from_board_page(html: str) -> str | None:
+    """The brand a board belongs to, from its Open Graph title or page title."""
+    raw = _meta(html, "og:title")
+    if not raw:
+        title = _PAGE_TITLE.search(html)
+        raw = unescape(title.group(1)).strip() if title else None
+    if not raw:
+        return None
+    name = _BOARD_NAME_PREFIX.sub("", _BOARD_NAME_SUFFIX.sub("", raw)).strip()
+    return name or None
+
+
+def board_company_metadata(ats: str, slug: str) -> dict:
+    """Read one board page for its company display name and logo URL.
+
+    Returns `{}` rather than raising: company metadata is presentation detail,
+    and a board whose page is unreachable must still be collectable. Ashby
+    publishes no logo at all, so an absent `logo_url` is normal, not a failure.
+    """
+    page = SOURCES.get(ats, {}).get("board_page")
+    if not page:
+        return {}
+    try:
+        html = fetch(page.format(slug=urllib.parse.quote(slug)), timeout=25, retries=2)
+    except Exception:
+        return {}
+    html = html.decode("utf-8", "ignore")
+    metadata = {}
+    name = company_name_from_board_page(html)
+    if name:
+        metadata["company_name"] = name
+    logo = _meta(html, "og:image")
+    if logo:
+        metadata["company_logo_url"] = logo
+    return metadata
+
+
+# --------------------------------------------------------------------------- #
 # Comeet discovery
 #
 # Comeet needs its own discovery path for two reasons the other three do not
@@ -693,7 +757,17 @@ def comeet_board_metadata(slug: str, company_uid: str) -> dict | None:
     token = _COMEET_TOKEN.search(html)
     if not token:
         return None
-    return {"company_uid": company_uid, "public_token": token.group(1)}
+    metadata = {"company_uid": company_uid, "public_token": token.group(1)}
+    # Free: this page was already fetched for the token, and Comeet's logo URL is
+    # constructible from the identifiers we hold rather than scraped.
+    name = company_name_from_board_page(html)
+    if name:
+        metadata["company_name"] = name
+    metadata["company_logo_url"] = (
+        f"https://www.comeet.co/pub/{urllib.parse.quote(slug)}"
+        f"/{urllib.parse.quote(company_uid)}/logo?size=small"
+    )
+    return metadata
 
 
 def deduplicate_comeet_aliases(boards: list[dict]) -> list[dict]:
@@ -891,8 +965,15 @@ def scan_board(
     etag: str | None = None,
     meta: dict | None = None,
     comeet_metadata: dict | None = None,
+    keep_description: bool = False,
 ) -> list[dict]:
     """Fetch one board, return flat rows for matching listed jobs.
+
+    `keep_description` retains the provider's own description text on each row
+    instead of dropping it. It defaults off because `FIELDS` defines the CSV
+    columns and `csv.DictWriter` is constructed without `extrasaction`, so an
+    extra key would raise on write. Only the in-process dispatch seam sets it;
+    the CLI output paths are unchanged.
 
     Descriptions are read only when --grep needs them, and even then only the
     matched fragments survive — the full text dominates every payload, and holding
@@ -941,8 +1022,11 @@ def scan_board(
             if not hits:
                 continue
 
-        norm.pop("_description", None)
-        rows.append({"ats": ats, "company": slug, **norm, "matched": " … ".join(hits)})
+        description = norm.pop("_description", None)
+        row = {"ats": ats, "company": slug, **norm, "matched": " … ".join(hits)}
+        if keep_description:
+            row["description"] = description or ""
+        rows.append(row)
     return rows
 
 
@@ -963,7 +1047,8 @@ def dispatch_board(
     """Run existing board collection once and return a sanitized in-process fact."""
     try:
         rows = scan_board(
-            ats, slug, None, False, "fuzzy", comeet_metadata=comeet_metadata
+            ats, slug, None, False, "fuzzy", comeet_metadata=comeet_metadata,
+            keep_description=True,
         )
         return ProviderDispatch("succeeded", True, tuple(rows))
     except NotFound:

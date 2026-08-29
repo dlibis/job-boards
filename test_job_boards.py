@@ -1196,11 +1196,16 @@ def test_comeet_board_metadata_extracts_the_public_token_from_the_board_page():
     original = jb.fetch
     jb.fetch = lambda *_a, **_k: html
     try:
-        assert jb.comeet_board_metadata("israeltechguard", "29.009") == {
-            "company_uid": "29.009", "public_token": "92936F65271401F1",
-        }
+        found = jb.comeet_board_metadata("israeltechguard", "29.009")
     finally:
         jb.fetch = original
+    assert found["company_uid"] == "29.009"
+    assert found["public_token"] == "92936F65271401F1"
+    # The logo is built from identifiers we already hold, not scraped, so it is
+    # present even for a page carrying no company name.
+    assert found["company_logo_url"] == (
+        "https://www.comeet.co/pub/israeltechguard/29.009/logo?size=small"
+    )
 
 
 def test_comeet_board_without_a_token_is_treated_as_dead():
@@ -1315,6 +1320,67 @@ def test_a_dead_comeet_alias_cannot_displace_a_live_one_sharing_its_uid():
     assert found == [
         {"slug": "zzz-live", "company_uid": "AA.001", "public_token": "TOK"}
     ], found
+
+
+def test_descriptions_reach_the_dispatch_seam_but_never_the_cli_row():
+    """FIELDS defines the CSV columns and DictWriter has no extrasaction, so an
+    extra key on a CLI row raises on write. Only the in-process seam keeps it.
+    """
+    import job_boards as jb
+    payload = {"jobs": [{
+        "isListed": True, "id": "job-1", "title": "Developer",
+        "descriptionPlain": "We are hiring a developer.",
+    }]}
+    original = jb.fetch
+    jb.fetch = lambda *_a, **_k: json.dumps(payload).encode()
+    try:
+        cli = jb.scan_board("ashby", "acme", None, False, "fuzzy")
+        seam = jb.dispatch_board("ashby", "acme").rows
+    finally:
+        jb.fetch = original
+    assert sorted(cli[0]) == sorted(FIELDS), "CLI output gained a column"
+    assert "description" not in cli[0]
+    assert seam[0]["description"] == "We are hiring a developer."
+
+
+def test_a_provider_without_a_free_description_yields_an_empty_one():
+    """Greenhouse only ships descriptions under ?content=true, which costs ~19x
+    the bytes and is deliberately not requested. Absence is not failure.
+    """
+    import job_boards as jb
+    payload = {"jobs": [{"id": 1, "title": "Developer", "location": {"name": "Tel Aviv"}}]}
+    original = jb.fetch
+    jb.fetch = lambda *_a, **_k: json.dumps(payload).encode()
+    try:
+        rows = jb.dispatch_board("greenhouse", "acme").rows
+    finally:
+        jb.fetch = original
+    assert rows[0]["description"] == ""
+
+
+def test_company_name_is_read_from_the_board_page_and_stripped_of_board_wording():
+    """A slug is often not the brand: residenthome is Ashley Digital."""
+    from job_boards import company_name_from_board_page as name
+    assert name('<meta property="og:title" content="Ashley Digital">') == "Ashley Digital"
+    assert name('<meta property="og:title" content="Palantir Technologies jobs">') == "Palantir Technologies"
+    assert name("<title>Linear Jobs</title>") == "Linear"
+    assert name("<title>Jobs at Ashley Digital</title>") == "Ashley Digital"
+    assert name('<meta property="og:title" content="Job opportunities at ScyllaDB">') == "ScyllaDB"
+    assert name("<html>no title at all</html>") is None
+
+
+def test_board_metadata_absence_never_blocks_collection():
+    """Ashby publishes no logo, and an unreachable page must not fail a board."""
+    import job_boards as jb
+    original = jb.fetch
+    try:
+        jb.fetch = lambda *_a, **_k: b'<title>Linear Jobs</title>'
+        found = jb.board_company_metadata("ashby", "linear")
+        assert found == {"company_name": "Linear"}, found
+        jb.fetch = lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("unreachable"))
+        assert jb.board_company_metadata("ashby", "linear") == {}
+    finally:
+        jb.fetch = original
 
 
 if __name__ == "__main__":
