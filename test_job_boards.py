@@ -153,6 +153,10 @@ def test_comeet_normalization_and_dispatch_boundary_are_offline():
         jb.fetch = original
 
 
+def test_comeet_position_without_a_provider_job_identifier_is_dropped():
+    assert normalize_comeet({"name": "Developer"}) is None
+
+
 def test_successful_dispatch_uses_the_same_exhaustive_contract_for_every_provider():
     import job_boards as jb
     original = jb.scan_board
@@ -165,6 +169,27 @@ def test_successful_dispatch_uses_the_same_exhaustive_contract_for_every_provide
             assert outcome.exhaustive is True
     finally:
         jb.scan_board = original
+
+
+def test_batch_dispatch_preserves_board_retry_and_one_result_per_board():
+    import job_boards as jb
+    original = jb.dispatch_board
+    attempts = {}
+
+    def dispatch(ats, slug, *, comeet_metadata=None):
+        key = (ats, slug)
+        attempts[key] = attempts.get(key, 0) + 1
+        if slug == "retry" and attempts[key] == 1:
+            return jb.ProviderDispatch("failed", False, ())
+        return jb.ProviderDispatch("succeeded", True, ())
+
+    jb.dispatch_board = dispatch
+    try:
+        outcomes = jb.dispatch_boards((("ashby", "retry", None), ("lever", "ready", None)))
+        assert [outcome.status for outcome in outcomes] == ["succeeded", "succeeded"]
+        assert attempts == {("ashby", "retry"): 2, ("lever", "ready"): 1}
+    finally:
+        jb.dispatch_board = original
 
 
 def test_comeet_dispatch_failure_is_sanitized_and_contains_no_token():

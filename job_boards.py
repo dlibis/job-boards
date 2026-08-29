@@ -342,11 +342,14 @@ def normalize_lever(job: dict) -> dict | None:
 
 def normalize_comeet(job: dict) -> dict | None:
     """Normalize Comeet's public position shape into the existing native fields."""
+    job_id = job.get("uid") or job.get("id")
+    if not job_id:
+        return None
     location = job.get("location") or ""
     if isinstance(location, dict):
         location = location.get("name") or location.get("city") or ""
     return {
-        "id": str(job.get("uid") or job.get("id") or ""),
+        "id": str(job_id),
         "title": job.get("name") or job.get("title") or "",
         "department": (job.get("department") or {}).get("name", "") if isinstance(job.get("department"), dict) else job.get("department") or "",
         "team": "",
@@ -820,6 +823,22 @@ def dispatch_board(
         return ProviderDispatch("not_found", False, ())
     except Exception:
         return ProviderDispatch("failed", False, (), error_message="collector request failed")
+
+
+def dispatch_boards(
+    boards: tuple[tuple[str, str, dict | None], ...], concurrency: int = 8
+) -> tuple[ProviderDispatch, ...]:
+    """Dispatch a selected board batch with the collector's normal retry and concurrency."""
+    def dispatch_with_retry(board: tuple[str, str, dict | None]) -> ProviderDispatch:
+        ats, slug, comeet_metadata = board
+        for attempt in range(2):
+            result = dispatch_board(ats, slug, comeet_metadata=comeet_metadata)
+            if result.status != "failed" or attempt:
+                return result
+        raise RuntimeError("unreachable")
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        return tuple(pool.map(dispatch_with_retry, boards))
 
 
 # --------------------------------------------------------------------------- #
