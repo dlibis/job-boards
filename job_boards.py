@@ -696,6 +696,22 @@ def comeet_board_metadata(slug: str, company_uid: str) -> dict | None:
     return {"company_uid": company_uid, "public_token": token.group(1)}
 
 
+def deduplicate_comeet_aliases(boards: list[dict]) -> list[dict]:
+    """Collapse slug aliases so each company UID yields exactly one board.
+
+    The UID is the durable source identity; the slug is only how a board is
+    addressed. Sorting by slug here rather than trusting the caller makes the
+    winner independent of the order concurrent metadata resolution happened to
+    finish in, so repeated runs pick the same slug.
+    """
+    by_uid: dict[str, dict] = {}
+    for board in sorted(boards, key=lambda board: board["slug"]):
+        # Hex UIDs differ only in case between captures; normalise before keying.
+        uid = board["company_uid"].upper()
+        by_uid.setdefault(uid, {**board, "company_uid": uid})
+    return list(by_uid.values())
+
+
 def discover_comeet_boards(
     concurrency: int = 8, recent_days: int | None = None
 ) -> list[dict]:
@@ -719,25 +735,20 @@ def discover_comeet_boards(
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         resolved = pool.map(lambda c: comeet_board_metadata(*c), candidates)
 
-    by_uid: dict[str, dict] = {}
-    aliases = 0
-    for (slug, _uid), metadata in zip(candidates, resolved):
-        if not metadata:
-            continue
-        # Hex UIDs differ only in case between captures; normalise before keying.
-        uid = metadata["company_uid"].upper()
-        if uid in by_uid:
-            aliases += 1
-            continue
-        by_uid[uid] = {"slug": slug, **metadata, "company_uid": uid}
-
-    live = list(by_uid.values())
-    dead = len(candidates) - len(live) - aliases
+    # Dead aliases drop out before deduplication, so a dead slug can never
+    # displace a live one that shares its UID.
+    live = [
+        {"slug": slug, **metadata}
+        for (slug, _uid), metadata in zip(candidates, resolved)
+        if metadata
+    ]
+    boards = deduplicate_comeet_aliases(live)
+    dead, aliases = len(candidates) - len(live), len(live) - len(boards)
     print(
-        f"  {len(live)} live boards ({dead} dead, {aliases} alias slugs collapsed)",
+        f"  {len(boards)} live boards ({dead} dead, {aliases} alias slugs collapsed)",
         file=sys.stderr,
     )
-    return live
+    return boards
 
 
 def _read_boards(path: Path) -> dict[str, list[str]]:

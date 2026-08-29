@@ -1237,32 +1237,68 @@ def test_discover_comeet_boards_returns_only_live_boards_with_their_metadata():
     assert found == [{"slug": "live", "company_uid": "AA.001", "public_token": "TOK"}], found
 
 
+def test_comeet_deduplication_keeps_every_board_with_a_unique_uid():
+    from job_boards import deduplicate_comeet_aliases
+    boards = [
+        {"slug": "acme", "company_uid": "AA.001", "public_token": "T1"},
+        {"slug": "other", "company_uid": "BB.002", "public_token": "T2"},
+    ]
+    assert deduplicate_comeet_aliases(boards) == boards
+
+
 def test_comeet_alias_slugs_collapse_to_one_board_per_company_uid():
     """One company can publish several slugs that all resolve to one UID.
 
     The UID is the durable source identity, so a caller keyed on it would be
     handed the same board several times and try to commit one receipt twice.
-    Collapsing here keeps that impossible. The winning slug is the first in
-    sorted order, so the choice is stable across runs.
+    """
+    from job_boards import deduplicate_comeet_aliases
+    found = deduplicate_comeet_aliases([
+        {"slug": "zebra", "company_uid": "AA.001", "public_token": "T"},
+        {"slug": "acme", "company_uid": "AA.001", "public_token": "T"},
+        {"slug": "acme-careers", "company_uid": "aa.001", "public_token": "T"},  # lowercase uid
+        {"slug": "other", "company_uid": "BB.002", "public_token": "T"},
+    ])
+    assert [b["company_uid"] for b in found] == ["AA.001", "BB.002"], found
+    assert found[0]["slug"] == "acme", "the first slug in sorted order represents the UID"
+
+
+def test_comeet_deduplication_does_not_depend_on_input_order():
+    """Metadata resolves concurrently, so completion order must not pick the winner."""
+    from job_boards import deduplicate_comeet_aliases
+    boards = [
+        {"slug": "zebra", "company_uid": "AA.001", "public_token": "T"},
+        {"slug": "acme", "company_uid": "AA.001", "public_token": "T"},
+        {"slug": "middle", "company_uid": "AA.001", "public_token": "T"},
+    ]
+    for ordering in (boards, boards[::-1], [boards[1], boards[0], boards[2]]):
+        assert deduplicate_comeet_aliases(ordering) == [
+            {"slug": "acme", "company_uid": "AA.001", "public_token": "T"}
+        ], ordering
+
+
+def test_a_dead_comeet_alias_cannot_displace_a_live_one_sharing_its_uid():
+    """Dead aliases drop out before deduplication.
+
+    "aaa-dead" sorts first, so deduplicating before resolution would let a board
+    with no token represent the UID and silently lose the company entirely.
     """
     import job_boards as jb
     rows = [["original"],
-            ["https://www.comeet.com/jobs/zebra/AA.001"],
-            ["https://www.comeet.com/jobs/acme/AA.001"],        # alias of the same company
-            ["https://www.comeet.com/jobs/acme-careers/aa.001"],  # alias, lowercase uid
-            ["https://www.comeet.com/jobs/other/BB.002"]]
+            ["https://www.comeet.com/jobs/aaa-dead/AA.001"],
+            ["https://www.comeet.com/jobs/zzz-live/AA.001"]]
     original_fetch, original_meta = jb.fetch, jb.comeet_board_metadata
     jb.fetch = lambda *_a, **_k: json.dumps(rows).encode()
-    jb.comeet_board_metadata = lambda slug, uid: {"company_uid": uid, "public_token": "TOK"}
+    jb.comeet_board_metadata = lambda slug, uid: (
+        None if slug == "aaa-dead" else {"company_uid": uid, "public_token": "TOK"}
+    )
     try:
         found = jb.discover_comeet_boards()
     finally:
         jb.fetch, jb.comeet_board_metadata = original_fetch, original_meta
-
-    assert [b["company_uid"] for b in found] == ["AA.001", "BB.002"], found
-    # "acme" sorts before "acme-careers" and "zebra", so it represents AA.001.
-    assert found[0]["slug"] == "acme", found
-    assert len({b["company_uid"] for b in found}) == len(found), "one board per UID"
+    assert found == [
+        {"slug": "zzz-live", "company_uid": "AA.001", "public_token": "TOK"}
+    ], found
 
 
 if __name__ == "__main__":
