@@ -384,7 +384,22 @@ SOURCES = {
         "junk_prefixes": ("root.",),
     },
     "greenhouse": {
-        "domains": ["boards.greenhouse.io", "job-boards.greenhouse.io"],
+        # The *.eu.* pair is Greenhouse's EU-region board host, mirroring the US
+        # pair: boards.eu -> job-boards.eu, exactly as boards -> job-boards. Only
+        # the public board page is regionalised — there is no
+        # boards-api.eu.greenhouse.io, and EU-hosted slugs resolve against the same
+        # posting API below (verified 2026-08-29: aerlingus, abbyy, accountsiq all
+        # 200 there). So these need no separate api entry and no _POOLED_HOSTS
+        # addition; without them, EU-only boards are simply never discovered.
+        # Ashby and Lever were checked the same way and have no regional hosts:
+        # jobs.eu.lever.co/api.eu.lever.co are wildcard DNS that 302 to the
+        # marketing site and 404 on real slugs.
+        "domains": [
+            "boards.greenhouse.io",
+            "job-boards.greenhouse.io",
+            "boards.eu.greenhouse.io",
+            "job-boards.eu.greenhouse.io",
+        ],
         "api": "https://boards-api.greenhouse.io/v1/boards/{slug}/jobs",
         "jobs": lambda payload: payload.get("jobs"),
         "normalize": normalize_greenhouse,
