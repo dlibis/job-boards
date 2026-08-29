@@ -62,6 +62,14 @@ WAYBACK_CDX = (
     "&matchType=domain&fl=original&collapse=urlkey&output=json"
 )
 URLSCAN_SEARCH = "https://urlscan.io/api/v1/search/?q=page.domain%3A{domain}&size=10000"
+# Comeet boards live at /jobs/{slug}/{company_uid}, so the slug is the *second*
+# path segment. The generic harvester reads the first, which is always the
+# literal "jobs" — hence a prefix query and a dedicated parser rather than a
+# `domains` entry.
+COMEET_JOBS_CDX = (
+    "http://web.archive.org/cdx/search/cdx?url=comeet.com/jobs"
+    "&matchType=prefix&fl=original&collapse=urlkey&output=json"
+)
 _SLUG_SHAPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,60}$")
 _SLUG_JUNK = {
     "_next", "api", "static", "assets", "meeting", "b", "favicon.ico",
@@ -631,6 +639,84 @@ def discover_boards(ats: str, concurrency: int = 8, recent_days: int | None = No
     if len(known) > len(live):
         print(f"  +{len(known) - len(live)} from seed/previous runs", file=sys.stderr)
     return sorted(known.values(), key=str.lower)
+
+
+# --------------------------------------------------------------------------- #
+# Comeet discovery
+#
+# Comeet needs its own discovery path for two reasons the other three do not
+# share: its board URL nests the slug one level deep (/jobs/{slug}/{uid}), and
+# its posting API refuses any request without that company's public token, so a
+# HEAD against a URL built from the slug alone cannot validate a board. Both the
+# uid and the token are published in the board page's own HTML, which is the
+# single fetch this performs per candidate.
+# --------------------------------------------------------------------------- #
+
+_COMEET_BOARD_PATH = re.compile(
+    r"/jobs/([^/?#]+)/([0-9A-Fa-f]{2}\.[0-9A-Fa-f]{3})", re.IGNORECASE
+)
+_COMEET_UID_SHAPE = re.compile(r"^[0-9A-Fa-f]{2}\.[0-9A-Fa-f]{3}$", re.IGNORECASE)
+_COMEET_TOKEN = re.compile(r'"token"\s*:\s*"([0-9A-Fa-f]+)"')
+
+
+def comeet_candidates(since_days: int | None = None) -> dict[str, str]:
+    """Harvest `slug -> company_uid` for Comeet boards from the archive."""
+    window = ""
+    if since_days is not None:
+        start = datetime.now(timezone.utc) - timedelta(days=since_days)
+        window = f"&from={start:%Y%m%d}"
+    print("  querying the Wayback Machine for comeet.com/jobs...", file=sys.stderr)
+    rows = json.loads(fetch(COMEET_JOBS_CDX + window, timeout=300, retries=3))
+    seen: dict[str, str] = {}
+    for row in rows[1:]:  # first row is the header
+        match = _COMEET_BOARD_PATH.search(urllib.parse.unquote(row[0]))
+        # A uid in the slug position is a malformed capture, not a board.
+        if match and not _COMEET_UID_SHAPE.match(match.group(1)):
+            seen.setdefault(match.group(1).lower(), match.group(2).upper())
+    print(f"    {len(rows) - 1} archived URLs -> {len(seen)} candidates", file=sys.stderr)
+    return seen
+
+
+def comeet_board_metadata(slug: str, company_uid: str) -> dict | None:
+    """Read a Comeet board's public page for its API token.
+
+    None means the board is not usable: gone (the page redirects away), or
+    behind the Spark Hire consent wall, or simply no longer publishing a token.
+    That is the Comeet equivalent of `board_exists()` returning False, and it is
+    why discovery drops roughly the same share of candidates here as elsewhere.
+    """
+    url = f"https://www.comeet.com/jobs/{urllib.parse.quote(slug)}/{urllib.parse.quote(company_uid)}"
+    try:
+        html = fetch(url, timeout=25, retries=2).decode("utf-8", "ignore")
+    except Exception:
+        return None  # transient or dead: the next refresh can find it
+    token = _COMEET_TOKEN.search(html)
+    if not token:
+        return None
+    return {"company_uid": company_uid, "public_token": token.group(1)}
+
+
+def discover_comeet_boards(
+    concurrency: int = 8, recent_days: int | None = None
+) -> list[dict]:
+    """Find live Comeet boards, each with the metadata needed to collect it.
+
+    Returns `{"slug", "company_uid", "public_token"}` rather than the bare slugs
+    the other platforms yield, because a Comeet board is not addressable without
+    its token.
+    """
+    print("comeet: discovering boards", file=sys.stderr)
+    candidates = sorted(comeet_candidates(since_days=recent_days).items())
+    print(f"  resolving metadata for {len(candidates)} candidates...", file=sys.stderr)
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        resolved = pool.map(lambda c: comeet_board_metadata(*c), candidates)
+    live = [
+        {"slug": slug, **metadata}
+        for (slug, _uid), metadata in zip(candidates, resolved)
+        if metadata
+    ]
+    print(f"  {len(live)} live boards ({len(candidates) - len(live)} dead)", file=sys.stderr)
+    return live
 
 
 def _read_boards(path: Path) -> dict[str, list[str]]:

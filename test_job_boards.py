@@ -1165,6 +1165,78 @@ def test_retry_after_beats_the_exponential_delay_but_is_capped():
     assert _retry_delay("3600", 0) == 30.0, "an absurd Retry-After is capped"
 
 
+def test_comeet_candidates_reads_the_slug_from_the_second_path_segment():
+    """Comeet nests the slug under /jobs/, unlike the other three platforms."""
+    import job_boards as jb
+    # CDX with fl=original returns one column per row, header first.
+    rows = [
+        ["original"],
+        ["https://www.comeet.com/jobs/israeltechguard/29.009"],
+        ["https://www.comeet.com/jobs/scylladb/E4.006/solution-architect/1E.C62"],
+        ["https://www.comeet.com/jobs/acme%20corp/AB.123"],
+        ["https://www.comeet.com/jobs/4A.004/4A.004"],   # uid in slug position: junk
+        ["https://www.comeet.com/about"],                # not a board at all
+    ]
+    original = jb.fetch
+    jb.fetch = lambda *_a, **_k: json.dumps(rows).encode()
+    try:
+        found = jb.comeet_candidates()
+    finally:
+        jb.fetch = original
+    assert found == {
+        "israeltechguard": "29.009",
+        "scylladb": "E4.006",
+        "acme corp": "AB.123",
+    }, found
+
+
+def test_comeet_board_metadata_extracts_the_public_token_from_the_board_page():
+    import job_boards as jb
+    html = b'{"company_uid": "29.009", "token": "92936F65271401F1"}'
+    original = jb.fetch
+    jb.fetch = lambda *_a, **_k: html
+    try:
+        assert jb.comeet_board_metadata("israeltechguard", "29.009") == {
+            "company_uid": "29.009", "public_token": "92936F65271401F1",
+        }
+    finally:
+        jb.fetch = original
+
+
+def test_comeet_board_without_a_token_is_treated_as_dead():
+    """A board that redirects away or serves the consent wall has no token.
+
+    That is Comeet's equivalent of board_exists() returning False: the posting
+    API rejects a tokenless request, so such a board is not collectable.
+    """
+    import job_boards as jb
+    original = jb.fetch
+    try:
+        jb.fetch = lambda *_a, **_k: b"<html>Request for consent</html>"
+        assert jb.comeet_board_metadata("gone", "AA.001") is None
+        jb.fetch = lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom"))
+        assert jb.comeet_board_metadata("gone", "AA.001") is None
+    finally:
+        jb.fetch = original
+
+
+def test_discover_comeet_boards_returns_only_live_boards_with_their_metadata():
+    import job_boards as jb
+    rows = [["original"],
+            ["https://www.comeet.com/jobs/live/AA.001"],
+            ["https://www.comeet.com/jobs/dead/BB.002"]]
+    original_fetch, original_meta = jb.fetch, jb.comeet_board_metadata
+    jb.fetch = lambda *_a, **_k: json.dumps(rows).encode()
+    jb.comeet_board_metadata = lambda slug, uid: (
+        {"company_uid": uid, "public_token": "TOK"} if slug == "live" else None
+    )
+    try:
+        found = jb.discover_comeet_boards()
+    finally:
+        jb.fetch, jb.comeet_board_metadata = original_fetch, original_meta
+    assert found == [{"slug": "live", "company_uid": "AA.001", "public_token": "TOK"}], found
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
