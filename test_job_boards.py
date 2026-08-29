@@ -1223,18 +1223,21 @@ def test_comeet_board_without_a_token_is_treated_as_dead():
 def test_discover_comeet_boards_returns_only_live_boards_with_their_metadata():
     import job_boards as jb
     rows = [["original"],
-            ["https://www.comeet.com/jobs/live/AA.001"],
+            ["https://www.comeet.com/jobs/live-z/AA.001"],
+            ["https://www.comeet.com/jobs/live-a/aa.001"],
             ["https://www.comeet.com/jobs/dead/BB.002"]]
     original_fetch, original_meta = jb.fetch, jb.comeet_board_metadata
     jb.fetch = lambda *_a, **_k: json.dumps(rows).encode()
     jb.comeet_board_metadata = lambda slug, uid: (
-        {"company_uid": uid, "public_token": "TOK"} if slug == "live" else None
+        {"company_uid": uid, "public_token": "TOK"} if slug.startswith("live-") else None
     )
     try:
         found = jb.discover_comeet_boards()
     finally:
         jb.fetch, jb.comeet_board_metadata = original_fetch, original_meta
-    assert found == [{"slug": "live", "company_uid": "AA.001", "public_token": "TOK"}], found
+    assert found == [
+        {"slug": "live-a", "company_uid": "AA.001", "public_token": "TOK"}
+    ], found
 
 
 def test_comeet_deduplication_keeps_every_board_with_a_unique_uid():
@@ -1261,6 +1264,19 @@ def test_comeet_alias_slugs_collapse_to_one_board_per_company_uid():
     ])
     assert [b["company_uid"] for b in found] == ["AA.001", "BB.002"], found
     assert found[0]["slug"] == "acme", "the first slug in sorted order represents the UID"
+
+
+def test_same_comeet_uid_with_different_tokens_remains_an_identity_conflict():
+    """A shared UID alone is insufficient proof that two live routes are aliases."""
+    from job_boards import deduplicate_comeet_aliases
+    boards = [
+        {"slug": "acme", "company_uid": "AA.001", "public_token": "OLD"},
+        {"slug": "acme-new", "company_uid": "aa.001", "public_token": "NEW"},
+    ]
+    assert deduplicate_comeet_aliases(boards) == [
+        {"slug": "acme", "company_uid": "AA.001", "public_token": "OLD"},
+        {"slug": "acme-new", "company_uid": "AA.001", "public_token": "NEW"},
+    ]
 
 
 def test_comeet_deduplication_does_not_depend_on_input_order():

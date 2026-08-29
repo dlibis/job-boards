@@ -697,19 +697,23 @@ def comeet_board_metadata(slug: str, company_uid: str) -> dict | None:
 
 
 def deduplicate_comeet_aliases(boards: list[dict]) -> list[dict]:
-    """Collapse slug aliases so each company UID yields exactly one board.
+    """Collapse only routes proven equivalent by company UID and public token.
 
     The UID is the durable source identity; the slug is only how a board is
     addressed. Sorting by slug here rather than trusting the caller makes the
     winner independent of the order concurrent metadata resolution happened to
-    finish in, so repeated runs pick the same slug.
+    finish in, so repeated runs pick the same slug. A UID published with two
+    different tokens is intentionally left as two records: discovery has not
+    proved those routes equivalent, and downstream identity validation must
+    surface the conflict rather than silently overwriting either credential.
     """
-    by_uid: dict[str, dict] = {}
+    by_identity_proof: dict[tuple[str, str], dict] = {}
     for board in sorted(boards, key=lambda board: board["slug"]):
         # Hex UIDs differ only in case between captures; normalise before keying.
         uid = board["company_uid"].upper()
-        by_uid.setdefault(uid, {**board, "company_uid": uid})
-    return list(by_uid.values())
+        key = (uid, board["public_token"])
+        by_identity_proof.setdefault(key, {**board, "company_uid": uid})
+    return list(by_identity_proof.values())
 
 
 def discover_comeet_boards(
@@ -721,13 +725,10 @@ def discover_comeet_boards(
     the other platforms yield, because a Comeet board is not addressable without
     its token.
 
-    One company often publishes several slug aliases — a rename, a campaign
-    landing page — that all resolve to the same company UID and therefore to the
-    same set of postings. The UID is the durable identity, so aliases are
-    collapsed here, at the provider boundary, rather than downstream: a caller
-    keyed on the UID would otherwise be handed the same board several times.
-    Candidates are resolved in sorted order and the first slug for each UID
-    wins, so the choice is stable across runs.
+    Routes are collapsed only when both normalized company UID and public token
+    match. Candidates are resolved before grouping and the lexicographically
+    first live slug for each proven-equivalent pair wins, so dead routes cannot
+    hide live ones and the choice is stable across runs.
     """
     print("comeet: discovering boards", file=sys.stderr)
     candidates = sorted(comeet_candidates(since_days=recent_days).items())
