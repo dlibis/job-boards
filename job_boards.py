@@ -704,18 +704,39 @@ def discover_comeet_boards(
     Returns `{"slug", "company_uid", "public_token"}` rather than the bare slugs
     the other platforms yield, because a Comeet board is not addressable without
     its token.
+
+    One company often publishes several slug aliases — a rename, a campaign
+    landing page — that all resolve to the same company UID and therefore to the
+    same set of postings. The UID is the durable identity, so aliases are
+    collapsed here, at the provider boundary, rather than downstream: a caller
+    keyed on the UID would otherwise be handed the same board several times.
+    Candidates are resolved in sorted order and the first slug for each UID
+    wins, so the choice is stable across runs.
     """
     print("comeet: discovering boards", file=sys.stderr)
     candidates = sorted(comeet_candidates(since_days=recent_days).items())
     print(f"  resolving metadata for {len(candidates)} candidates...", file=sys.stderr)
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         resolved = pool.map(lambda c: comeet_board_metadata(*c), candidates)
-    live = [
-        {"slug": slug, **metadata}
-        for (slug, _uid), metadata in zip(candidates, resolved)
-        if metadata
-    ]
-    print(f"  {len(live)} live boards ({len(candidates) - len(live)} dead)", file=sys.stderr)
+
+    by_uid: dict[str, dict] = {}
+    aliases = 0
+    for (slug, _uid), metadata in zip(candidates, resolved):
+        if not metadata:
+            continue
+        # Hex UIDs differ only in case between captures; normalise before keying.
+        uid = metadata["company_uid"].upper()
+        if uid in by_uid:
+            aliases += 1
+            continue
+        by_uid[uid] = {"slug": slug, **metadata, "company_uid": uid}
+
+    live = list(by_uid.values())
+    dead = len(candidates) - len(live) - aliases
+    print(
+        f"  {len(live)} live boards ({dead} dead, {aliases} alias slugs collapsed)",
+        file=sys.stderr,
+    )
     return live
 
 

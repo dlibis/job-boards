@@ -1237,6 +1237,34 @@ def test_discover_comeet_boards_returns_only_live_boards_with_their_metadata():
     assert found == [{"slug": "live", "company_uid": "AA.001", "public_token": "TOK"}], found
 
 
+def test_comeet_alias_slugs_collapse_to_one_board_per_company_uid():
+    """One company can publish several slugs that all resolve to one UID.
+
+    The UID is the durable source identity, so a caller keyed on it would be
+    handed the same board several times and try to commit one receipt twice.
+    Collapsing here keeps that impossible. The winning slug is the first in
+    sorted order, so the choice is stable across runs.
+    """
+    import job_boards as jb
+    rows = [["original"],
+            ["https://www.comeet.com/jobs/zebra/AA.001"],
+            ["https://www.comeet.com/jobs/acme/AA.001"],        # alias of the same company
+            ["https://www.comeet.com/jobs/acme-careers/aa.001"],  # alias, lowercase uid
+            ["https://www.comeet.com/jobs/other/BB.002"]]
+    original_fetch, original_meta = jb.fetch, jb.comeet_board_metadata
+    jb.fetch = lambda *_a, **_k: json.dumps(rows).encode()
+    jb.comeet_board_metadata = lambda slug, uid: {"company_uid": uid, "public_token": "TOK"}
+    try:
+        found = jb.discover_comeet_boards()
+    finally:
+        jb.fetch, jb.comeet_board_metadata = original_fetch, original_meta
+
+    assert [b["company_uid"] for b in found] == ["AA.001", "BB.002"], found
+    # "acme" sorts before "acme-careers" and "zebra", so it represents AA.001.
+    assert found[0]["slug"] == "acme", found
+    assert len({b["company_uid"] for b in found}) == len(found), "one board per UID"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
