@@ -128,17 +128,24 @@ def test_comeet_uses_caller_metadata_without_a_metadata_file():
 
 
 def test_comeet_normalization_and_dispatch_boundary_are_offline():
+    """Fixture shape verified against the live API (2026-08-29, scylladb/E4.006):
+    a bare array, snake_case fields, `is_remote` nested under `location`.
+    """
     import job_boards as jb
-    payload = {"positions": [{
-        "uid": "position-1", "name": "Developer", "location": {"city": "Tel Aviv"},
-        "publicUrl": "https://www.comeet.com/jobs/position-1",
-    }]}
-    row = normalize_comeet(payload["positions"][0])
+    payload = [{
+        "uid": "position-1", "name": "Developer", "department": "R&D",
+        "employment_type": "Full-time",
+        "location": {"name": "Tel Aviv, Israel", "is_remote": False},
+        "workplace_type": "Hybrid", "time_updated": "2026-06-10T16:03:01Z",
+        "url_active_page": "https://acme.example/careers/position-1",
+        "url_comeet_hosted_page": "https://www.comeet.com/jobs/acme/E4.006/position-1",
+    }]
+    row = normalize_comeet(payload[0])
     assert row == {
-        "id": "position-1", "title": "Developer", "department": "", "team": "",
-        "employmentType": "", "location": "Tel Aviv", "isRemote": False,
-        "workplaceType": "", "publishedAt": "",
-        "jobUrl": "https://www.comeet.com/jobs/position-1", "_description": "",
+        "id": "position-1", "title": "Developer", "department": "R&D", "team": "",
+        "employmentType": "Full-time", "location": "Tel Aviv, Israel", "isRemote": False,
+        "workplaceType": "Hybrid", "publishedAt": "2026-06-10T16:03:01Z",
+        "jobUrl": "https://acme.example/careers/position-1", "_description": "",
     }
     original = jb.fetch
     jb.fetch = lambda *_args, **_kwargs: json.dumps(payload).encode()
@@ -151,6 +158,20 @@ def test_comeet_normalization_and_dispatch_boundary_are_offline():
         assert len(outcome.rows) == 1
     finally:
         jb.fetch = original
+
+
+def test_comeet_falls_back_to_its_own_hosted_page_when_no_active_page_is_detected():
+    """`url_detected_page`/`url_active_page` are null for many real companies;
+    only `url_comeet_hosted_page` is guaranteed present.
+    """
+    row = normalize_comeet({
+        "uid": "position-2", "name": "Designer",
+        "location": {"name": "Remote", "is_remote": True},
+        "url_active_page": None,
+        "url_comeet_hosted_page": "https://www.comeet.com/jobs/acme/E4.006/position-2",
+    })
+    assert row["jobUrl"] == "https://www.comeet.com/jobs/acme/E4.006/position-2"
+    assert row["isRemote"] is True
 
 
 def test_comeet_position_without_a_provider_job_identifier_is_dropped():

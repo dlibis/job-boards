@@ -341,24 +341,34 @@ def normalize_lever(job: dict) -> dict | None:
 
 
 def normalize_comeet(job: dict) -> dict | None:
-    """Normalize Comeet's public position shape into the existing native fields."""
-    job_id = job.get("uid") or job.get("id")
+    """Normalize Comeet's public `details=false` position shape.
+
+    Verified against the live API (2026-08-29): the response is a bare JSON
+    array, not `{"positions": [...]}`, and every field is snake_case —
+    `time_updated`, `workplace_type`, `employment_type` — not the camelCase
+    names the other platforms use. `is_remote` lives inside `location`, not at
+    the top level. There is no `description` field at this detail level;
+    Comeet is never queried with `details=true` (see `content_param` below),
+    so `_description` is always empty and only title matching applies.
+    `url_active_page` is the company's own detected careers-page URL when
+    Comeet found one, and falls back to Comeet's own hosted page otherwise —
+    always populated, unlike `url_detected_page` which is often null.
+    """
+    job_id = job.get("uid")
     if not job_id:
         return None
-    location = job.get("location") or ""
-    if isinstance(location, dict):
-        location = location.get("name") or location.get("city") or ""
+    location = job.get("location") or {}
     return {
         "id": str(job_id),
-        "title": job.get("name") or job.get("title") or "",
-        "department": (job.get("department") or {}).get("name", "") if isinstance(job.get("department"), dict) else job.get("department") or "",
+        "title": job.get("name") or "",
+        "department": job.get("department") or "",
         "team": "",
-        "employmentType": job.get("employmentType") or "",
-        "location": str(location),
-        "isRemote": bool(job.get("isRemote")),
-        "workplaceType": job.get("workplaceType") or "",
-        "publishedAt": job.get("publishedAt") or "",
-        "jobUrl": job.get("url") or job.get("publicUrl") or "",
+        "employmentType": job.get("employment_type") or "",
+        "location": location.get("name") or "" if isinstance(location, dict) else str(location),
+        "isRemote": bool(location.get("is_remote")) if isinstance(location, dict) else False,
+        "workplaceType": job.get("workplace_type") or "",
+        "publishedAt": job.get("time_updated") or "",
+        "jobUrl": job.get("url_active_page") or job.get("url_comeet_hosted_page") or "",
         "_description": job.get("description") or "",
     }
 
@@ -394,9 +404,12 @@ SOURCES = {
     },
     "comeet": {
         "domains": [],
-        "api": "https://www.comeet.com/careers-api/2.0/company/{company_uid}/positions?token={public_token}",
-        "jobs": lambda payload: payload.get("positions") if isinstance(payload, dict) else None,
+        "api": "https://www.comeet.com/careers-api/2.0/company/{company_uid}/positions?token={public_token}&details=false",
+        # Comeet's payload IS the list, like Lever's; there is no wrapper object.
+        "jobs": lambda payload: payload if isinstance(payload, list) else None,
         "normalize": normalize_comeet,
+        # Always details=false: the addendum specifies this detail level, and it
+        # carries no description field to make content=true meaningful anyway.
         "content_param": None,
         "junk_prefixes": (),
     },
