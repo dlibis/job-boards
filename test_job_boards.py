@@ -147,10 +147,24 @@ def test_comeet_normalization_and_dispatch_boundary_are_offline():
             "comeet", "acme", comeet_metadata={"company_uid": "acme", "public_token": "token"}
         )
         assert outcome.status == "succeeded"
-        assert outcome.exhaustive is False
+        assert outcome.exhaustive is True
         assert len(outcome.rows) == 1
     finally:
         jb.fetch = original
+
+
+def test_successful_dispatch_uses_the_same_exhaustive_contract_for_every_provider():
+    import job_boards as jb
+    original = jb.scan_board
+    jb.scan_board = lambda *_args, **_kwargs: []
+    try:
+        for ats in jb.SOURCES:
+            metadata = {"company_uid": "acme", "public_token": "token"} if ats == "comeet" else None
+            outcome = jb.dispatch_board(ats, "acme", comeet_metadata=metadata)
+            assert outcome.status == "succeeded"
+            assert outcome.exhaustive is True
+    finally:
+        jb.scan_board = original
 
 
 def test_comeet_dispatch_failure_is_sanitized_and_contains_no_token():
