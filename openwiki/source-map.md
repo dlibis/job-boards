@@ -50,7 +50,7 @@ The working tree observed during earlier wiki generation included generated outp
 | `SOURCES`, `COLLINFO`, `WAYBACK_CDX` | External integration points and per-ATS API/domain configuration. |
 | `fetch()` | Shared HTTP behavior, retries, gzip, status-to-exception mapping, and user agent. |
 | `normalize_ashby()`, `normalize_greenhouse()`, `normalize_lever()` | Platform payload adapters into the shared row shape. |
-| `board_url()` | Builds platform posting API URLs and adds Greenhouse `content=true` only when grep needs descriptions. |
+| `board_url()` | Builds platform posting API URLs and adds each provider's paid content parameter (Greenhouse `content=true`, Comeet `details=true`) only when the caller opts in via `want_content` -- the CLI does that only for `--grep`, while the collector's `dispatch_board()` always opts in. |
 | `slug_from_url()`, `_add()`, `plausible()` | Archive URL to slug candidate pipeline. |
 | `candidates_from_wayback()`, `candidates_from_commoncrawl()` | Discovery integrations. |
 | `board_exists()`, `discover_boards()`, `load_boards()` | Board validation, union-with-known behavior, and cache loading. |

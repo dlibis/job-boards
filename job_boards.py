@@ -362,24 +362,63 @@ def normalize_lever(job: dict) -> dict | None:
     }
 
 
+def _comeet_section_order(order: object) -> float:
+    """A sortable position for one `details` section.
+
+    Real payloads carry a small int here, but nothing upstream guarantees that
+    shape, and a mix of comparable and incomparable `order` values (a string on
+    one section, the implicit `0` default on another) makes plain `sorted()`
+    raise `TypeError` — which would fail the *whole board*, not just one odd
+    section. Every value funnels through `float()`, so every key ends up the
+    same type; anything that cannot become a number (missing, `None`, a
+    string, a nested object) sorts as `0.0` rather than crashing.
+    """
+    try:
+        return float(order)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def normalize_comeet(job: dict) -> dict | None:
-    """Normalize Comeet's public `details=false` position shape.
+    """Normalize Comeet's public position shape.
 
     Verified against the live API (2026-08-29): the response is a bare JSON
     array, not `{"positions": [...]}`, and every field is snake_case —
     `time_updated`, `workplace_type`, `employment_type` — not the camelCase
     names the other platforms use. `is_remote` lives inside `location`, not at
-    the top level. There is no `description` field at this detail level;
-    Comeet is never queried with `details=true` (see `content_param` below),
-    so `_description` is always empty and only title matching applies.
-    `url_active_page` is the company's own detected careers-page URL when
-    Comeet found one, and falls back to Comeet's own hosted page otherwise —
-    always populated, unlike `url_detected_page` which is often null.
+    the top level. `url_active_page` is the company's own detected careers-page
+    URL when Comeet found one, and falls back to Comeet's own hosted page
+    otherwise — always populated, unlike `url_detected_page` which is often
+    null.
+
+    There is no top-level `description` field at any detail level — that was
+    never the right key. When queried with `details=true` (see `content_param`
+    below), the real description lives inside `job["details"]`, a list of
+    `{"name": ..., "value": ..., "order": ...}` sections (e.g. name=
+    "Description", name="Responsibilities", HTML in `value`), verified live on
+    two different companies. `_description` joins every section's `value`, in
+    `order`, separated by a blank line so the sections stay distinguishable
+    rather than running together as one blob — a board with no `details` key
+    (queried without `details=true`) or an empty list still yields an empty
+    string rather than failing.
+
+    A section is only included if its `value` is actually a string: nothing in
+    Comeet's contract stops a future section from carrying a nested list, an
+    object, or a number instead, and joining a non-string would raise
+    `TypeError` for the whole board rather than degrading one section.
     """
     job_id = job.get("uid")
     if not job_id:
         return None
     location = job.get("location") or {}
+    details = job.get("details") or []
+    sections = sorted(
+        (
+            d for d in details
+            if isinstance(d, dict) and isinstance(d.get("value"), str) and d["value"]
+        ),
+        key=lambda d: _comeet_section_order(d.get("order")),
+    )
     return {
         "id": str(job_id),
         "title": job.get("name") or "",
@@ -391,7 +430,7 @@ def normalize_comeet(job: dict) -> dict | None:
         "workplaceType": job.get("workplace_type") or "",
         "publishedAt": job.get("time_updated") or "",
         "jobUrl": job.get("url_active_page") or job.get("url_comeet_hosted_page") or "",
-        "_description": job.get("description") or "",
+        "_description": "\n\n".join(d["value"] for d in sections),
     }
 
 
@@ -517,13 +556,19 @@ SOURCES = {
     },
     "comeet": {
         "domains": [],
-        "api": "https://www.comeet.com/careers-api/2.0/company/{company_uid}/positions?token={public_token}&details=false",
+        "api": "https://www.comeet.com/careers-api/2.0/company/{company_uid}/positions?token={public_token}",
         # Comeet's payload IS the list, like Lever's; there is no wrapper object.
         "jobs": lambda payload: payload if isinstance(payload, list) else None,
         "normalize": normalize_comeet,
-        # Always details=false: the addendum specifies this detail level, and it
-        # carries no description field to make content=true meaningful anyway.
-        "content_param": None,
+        # Descriptions are opt-in and cost ~3.8x the bytes (19,209 -> 73,852
+        # bytes for the 15-position "pentera" board, measured live 2026-08-30),
+        # so they are requested only when the caller opts in via `want_content`
+        # — the CLI only does so for --grep, the collector's dispatch seam
+        # always does. Omitting `details` entirely is byte-identical to
+        # `details=false` (verified live: same byte count, no `details` key at
+        # all), so dropping the hardcoded default here changes nothing for
+        # callers that never request content.
+        "content_param": "details=true",
         "junk_prefixes": (),
     },
 }
@@ -1125,6 +1170,7 @@ def scan_board(
     meta: dict | None = None,
     comeet_metadata: dict | None = None,
     keep_description: bool = False,
+    want_content: bool | None = None,
 ) -> list[dict]:
     """Fetch one board, return flat rows for matching listed jobs.
 
@@ -1134,15 +1180,23 @@ def scan_board(
     extra key would raise on write. Only the in-process dispatch seam sets it;
     the CLI output paths are unchanged.
 
-    Descriptions are read only when --grep needs them, and even then only the
-    matched fragments survive — the full text dominates every payload, and holding
-    thousands of boards' worth would be gigabytes. --grep matches against the title
-    as well as the description; see the loop below for why they are searched apart.
+    `want_content` decides whether the paid content/details fetch is requested
+    at all. It defaults to `pattern is not None` — the CLI's original rule,
+    preserved byte-for-byte for every script invocation without `--grep` — but
+    the collector's in-process dispatch seam (`dispatch_board`) passes `True`
+    explicitly on every call, regardless of `--grep`, because the collector
+    always wants a description when the source can supply one. When `--grep`
+    is active, only the matched fragments survive the CLI's own output — the
+    full text dominates every payload, and holding thousands of boards' worth
+    would be gigabytes. --grep matches against the title as well as the
+    description; see the loop below for why they are searched apart.
     """
+    if want_content is None:
+        want_content = pattern is not None
     source = SOURCES[ats]
     payload = json.loads(
         fetch(
-            board_url(ats, slug, want_content=pattern is not None, comeet_metadata=comeet_metadata),
+            board_url(ats, slug, want_content=want_content, comeet_metadata=comeet_metadata),
             etag=etag,
             meta=meta,
         )
@@ -1203,11 +1257,19 @@ class ProviderDispatch:
 def dispatch_board(
     ats: str, slug: str, *, comeet_metadata: dict | None = None
 ) -> ProviderDispatch:
-    """Run existing board collection once and return a sanitized in-process fact."""
+    """Run existing board collection once and return a sanitized in-process fact.
+
+    Unlike the CLI, this always passes `want_content=True` -- every collector
+    dispatch pays for Greenhouse's `content=true` and Comeet's `details=true` on
+    every call, for every provider, regardless of `--grep`. That is a real,
+    recurring bandwidth cost (see `SOURCES["greenhouse"]` and
+    `SOURCES["comeet"]` for the measured multiples), accepted so the collector
+    can persist a description for every job a source can supply one for.
+    """
     try:
         rows = scan_board(
             ats, slug, None, False, "fuzzy", comeet_metadata=comeet_metadata,
-            keep_description=True,
+            keep_description=True, want_content=True,
         )
         return ProviderDispatch("succeeded", True, tuple(rows))
     except NotFound:

@@ -66,6 +66,7 @@ This flow shows the per-board filtering path before `main()` applies database-ba
 | Ashby | Object with `jobs` list. | `normalize_ashby()` drops jobs where `isListed` is false and uses `descriptionPlain` or `descriptionHtml` for grep text. |
 | Greenhouse | Object with `jobs` list. | `normalize_greenhouse()` converts integer ids to strings, reads nested `location.name`, infers remoteness from the location label, and uses `first_published` before `updated_at`. Descriptions require `?content=true`, requested only for `--grep`. |
 | Lever | Payload is the jobs list. | `normalize_lever()` reads title from `text`, maps category fields, converts epoch-millisecond `createdAt` to ISO time, and combines description fields for grep text. |
+| Comeet | Payload is the jobs list. | `normalize_comeet()` reads snake_case fields (`time_updated`, `workplace_type`), drops jobs missing `uid`, and nests `is_remote` under `location`. Descriptions require `details=true`, requested only for `--grep`; when present, `job["details"]` is a list of named sections joined by `value`, in `order`. |
 
 `scan_board()` strips the private `_description` field before output, so the [data model](../architecture/data-model.md) never stores full descriptions.
 
@@ -84,7 +85,7 @@ The two-word guard prevents a long query such as `senior software engineer` from
 
 The CLI warns when a grep pattern contains no `\b` word boundary because terms can match inside boilerplate words. The tests document the real footgun: `rust` also matches `trust`, while `\brust\b` avoids that false positive.
 
-Greenhouse is the expensive case: its normal list endpoint omits descriptions, so `--grep` appends `content=true` and the CLI warns that this is roughly 26x the bytes of a normal Greenhouse run. Ashby and Lever already return description text in their list payloads.
+Greenhouse and Comeet are the expensive cases: Greenhouse's normal list endpoint omits descriptions, so `--grep` appends `content=true`, and the CLI warns that this is roughly 26x the bytes of a normal Greenhouse run. Comeet's normal list endpoint likewise omits its `details` sections, so `--grep` appends `details=true`, measured at roughly 3.8x the bytes on a real 15-position board. Ashby and Lever already return description text in their list payloads.
 
 ## Conditional requests and board-level failures
 

@@ -160,6 +160,57 @@ def test_comeet_normalization_and_dispatch_boundary_are_offline():
         jb.fetch = original
 
 
+def test_comeet_dispatch_end_to_end_builds_joined_description_from_details():
+    """Full chain, not just `normalize_comeet()` in isolation: `content_param` ->
+    `board_url` -> `scan_board`'s fetch -> `normalize_comeet`'s join -> row assembly.
+
+    The offline dispatch test above carries no `details` key at all, so it only
+    proves the empty-description branch; this proves the populated one, and
+    fails if the join separator or ordering regresses.
+    """
+    import job_boards as jb
+    payload = [{
+        "uid": "position-9", "name": "Data Team Lead",
+        "details": [
+            {"name": "Responsibilities", "value": "Own the pipeline.", "order": 2},
+            {"name": "Description", "value": "We build analytics tools.", "order": 1},
+        ],
+    }]
+    original = jb.fetch
+    jb.fetch = lambda *_args, **_kwargs: json.dumps(payload).encode()
+    try:
+        outcome = jb.dispatch_board(
+            "comeet", "acme", comeet_metadata={"company_uid": "acme", "public_token": "token"}
+        )
+    finally:
+        jb.fetch = original
+    assert outcome.status == "succeeded"
+    assert outcome.rows[0]["description"] == "We build analytics tools.\n\nOwn the pipeline."
+
+
+def test_comeet_grep_matches_within_joined_details_content():
+    """--grep must see Comeet's joined `details` content, not just the title --
+    the same guarantee already pinned for Ashby in
+    test_grep_matches_the_title_not_only_the_description.
+    """
+    import job_boards as jb
+    payload = [{
+        "uid": "position-10", "name": "Software Engineer",
+        "details": [{"name": "Description", "value": "We use Kubernetes daily.", "order": 1}],
+    }]
+    original = jb.fetch
+    jb.fetch = lambda *_args, **_kwargs: json.dumps(payload).encode()
+    try:
+        rows = jb.scan_board(
+            "comeet", "acme", None, False, "fuzzy", re.compile("kubernetes", re.I),
+            comeet_metadata={"company_uid": "acme", "public_token": "token"},
+        )
+    finally:
+        jb.fetch = original
+    assert len(rows) == 1, "the description hit must survive to the output row"
+    assert "Kubernetes" in rows[0]["matched"]
+
+
 def test_comeet_falls_back_to_its_own_hosted_page_when_no_active_page_is_detected():
     """`url_detected_page`/`url_active_page` are null for many real companies;
     only `url_comeet_hosted_page` is guaranteed present.
@@ -486,6 +537,15 @@ def test_greenhouse_content_param_only_when_grepping():
     # platforms that always return descriptions must not gain a stray parameter
     assert "content=true" not in board_url("ashby", "ramp", want_content=True)
     assert "mode=json" in board_url("lever", "ro", want_content=True)
+
+
+def test_comeet_details_param_only_when_content_is_wanted():
+    """Comeet's descriptions cost ~3.8x the bytes, gated the same way Greenhouse's are."""
+    metadata = {"company_uid": "acme", "public_token": "token"}
+    assert "details=true" not in board_url("comeet", "acme", comeet_metadata=metadata)
+    assert "details=true" in board_url(
+        "comeet", "acme", want_content=True, comeet_metadata=metadata
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1343,9 +1403,10 @@ def test_descriptions_reach_the_dispatch_seam_but_never_the_cli_row():
     assert seam[0]["description"] == "We are hiring a developer."
 
 
-def test_a_provider_without_a_free_description_yields_an_empty_one():
-    """Greenhouse only ships descriptions under ?content=true, which costs ~19x
-    the bytes and is deliberately not requested. Absence is not failure.
+def test_a_missing_content_field_yields_an_empty_description_not_a_failure():
+    """The collector always requests content=true now, but a job that ships no
+    body (or an upstream shape that omits it) must still succeed with an empty
+    description rather than failing the job.
     """
     import job_boards as jb
     payload = {"jobs": [{"id": 1, "title": "Developer", "location": {"name": "Tel Aviv"}}]}
@@ -1356,6 +1417,118 @@ def test_a_provider_without_a_free_description_yields_an_empty_one():
     finally:
         jb.fetch = original
     assert rows[0]["description"] == ""
+
+
+def test_dispatch_board_requests_paid_content_for_greenhouse_and_comeet():
+    """The collector's own dispatch seam always pays for content/details, on
+    every provider, even with no --grep pattern in play -- unlike the CLI,
+    which only pays when --grep needs it (see
+    test_greenhouse_content_param_only_when_grepping).
+    """
+    import job_boards as jb
+    requested_urls = []
+
+    def fake_fetch(url, **_kwargs):
+        requested_urls.append(url)
+        return b"[]" if "comeet" in url else b'{"jobs": []}'
+
+    original = jb.fetch
+    jb.fetch = fake_fetch
+    try:
+        jb.dispatch_board("greenhouse", "acme")
+        jb.dispatch_board(
+            "comeet", "acme", comeet_metadata={"company_uid": "acme", "public_token": "token"}
+        )
+    finally:
+        jb.fetch = original
+    assert "content=true" in requested_urls[0]
+    assert "details=true" in requested_urls[1]
+
+
+def test_scan_board_called_the_cli_way_is_unchanged_for_greenhouse_and_comeet():
+    """Without an explicit want_content, scan_board must keep the CLI's original
+    rule -- pattern is not None -- byte-identical to before this spec.
+    """
+    import job_boards as jb
+    requested_urls = []
+
+    def fake_fetch(url, **_kwargs):
+        requested_urls.append(url)
+        return b"[]" if "comeet" in url else b'{"jobs": []}'
+
+    original = jb.fetch
+    jb.fetch = fake_fetch
+    try:
+        jb.scan_board("greenhouse", "acme", None, False, "fuzzy")
+        jb.scan_board(
+            "comeet", "acme", None, False, "fuzzy",
+            comeet_metadata={"company_uid": "acme", "public_token": "token"},
+        )
+    finally:
+        jb.fetch = original
+    assert "content=true" not in requested_urls[0]
+    assert "details=true" not in requested_urls[1]
+
+
+def test_comeet_normalize_joins_multi_section_details_in_order():
+    """Real `details=true` payloads carry several named sections; every section
+    with a value joins into one description, in `order`, not just "Description".
+
+    The join separator is a blank line, not a bare space: the sections are
+    independent prose/bullet blocks, and squashing them together with " " reads
+    as one run-on paragraph rather than distinguishable sections.
+    """
+    row = normalize_comeet({
+        "uid": "position-3", "name": "Engineer",
+        "details": [
+            {"name": "Responsibilities", "value": "Ship features.", "order": 2},
+            {"name": "Description", "value": "We build tools.", "order": 1},
+            {"name": "Empty Section", "value": "", "order": 3},
+        ],
+    })
+    assert row["_description"] == "We build tools.\n\nShip features."
+
+
+def test_comeet_normalize_details_missing_or_empty_yields_empty_description():
+    assert normalize_comeet({"uid": "position-4", "name": "Engineer"})["_description"] == ""
+    assert normalize_comeet({
+        "uid": "position-5", "name": "Engineer", "details": [],
+    })["_description"] == ""
+
+
+def test_comeet_normalize_survives_a_non_string_section_value():
+    """A section whose `value` is a nested list/dict/number must not crash the
+    whole board -- `" ".join`/`"\n\n".join` raises `TypeError` on a non-string,
+    and `dispatch_board`'s broad `except Exception` would turn that into a
+    failed board rather than one degraded job.
+    """
+    row = normalize_comeet({
+        "uid": "position-6", "name": "Engineer",
+        "details": [
+            {"name": "Description", "value": "We build tools.", "order": 1},
+            {"name": "Weird", "value": ["not", "a", "string"], "order": 2},
+            {"name": "AlsoWeird", "value": {"nested": "object"}, "order": 3},
+            {"name": "NumericValue", "value": 42, "order": 4},
+        ],
+    })
+    assert row["_description"] == "We build tools."
+
+
+def test_comeet_normalize_survives_mixed_or_non_numeric_order_values():
+    """A string `order` alongside another section's implicit int default must
+    not raise `TypeError` from comparing incomparable sort keys. A missing
+    `order` falls back to the same default as before this fix (`0`), so it
+    sorts first here, ahead of the explicit `1` and `"2"`.
+    """
+    row = normalize_comeet({
+        "uid": "position-7", "name": "Engineer",
+        "details": [
+            {"name": "Responsibilities", "value": "Ship features.", "order": "2"},
+            {"name": "Description", "value": "We build tools.", "order": 1},
+            {"name": "NoOrder", "value": "Leading section."},
+        ],
+    })
+    assert row["_description"] == "Leading section.\n\nWe build tools.\n\nShip features."
 
 
 def test_company_name_is_read_from_the_board_page_and_stripped_of_board_wording():

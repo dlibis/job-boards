@@ -269,12 +269,15 @@ when a `--grep` pattern contains no `\b`.
 
 Only matched fragments are kept, never whole descriptions.
 
-**Greenhouse costs ~26x more with `--grep`.** Ashby and Lever return descriptions whether
-or not you want them, so searching them is free. Greenhouse omits descriptions from its
-list endpoint and only returns them for `?content=true`, which takes one board from 25KB
-to 653KB gzipped — measured on `stripe`. The script requests content only when `--grep`
-is set, and warns when it does. A `--grep` sweep of every Greenhouse board is multiple
-gigabytes; scope it with `--ats` or `--limit` unless you mean it.
+**Greenhouse and Comeet cost more with `--grep`.** Ashby and Lever return descriptions
+whether or not you want them, so searching them is free. Greenhouse omits descriptions
+from its list endpoint and only returns them for `?content=true`, which takes one board
+from 25KB to 653KB gzipped — measured on `stripe`, **~26x**. Comeet is the same shape:
+its list endpoint omits `details` unless `details=true` is set, which took the 15-position
+`pentera` board from 19,209 to 73,852 bytes — measured live, **~3.8x**. The script requests
+content/details only when `--grep` is set, and warns when it does. A `--grep` sweep of
+every Greenhouse or Comeet board is multiple gigabytes; scope it with `--ats` or `--limit`
+unless you mean it.
 
 Fuzzy is much wider than exact: on a 26-board Ashby sample, `software engineer` returned
 **268** jobs fuzzy against **2** exact, because most companies prefix with Senior/Staff.
@@ -472,6 +475,7 @@ you trust `--remote` there.
 | gzip, Ashby | 1.73MB → 220KB, **8x** |
 | gzip, Greenhouse | 317KB → 25KB, **12x** |
 | Greenhouse `?content=true` | 25KB → 653KB, **26x** — descriptions are opt-in |
+| Comeet `details=true` | 19,209 → 73,852 bytes (`pentera`, 15 positions), **~3.8x** — descriptions are opt-in |
 | Lever payload | a bare JSON array, not `{"jobs": [...]}` |
 | Wayback CDX | 191k (ashby) + 1.35M (greenhouse) + 1.30M (lever) URLs |
 | Posting data | live, uncached — 946 jobs published the same day |
@@ -554,6 +558,7 @@ the cheap way to exercise a real request path.
 | Lever's `publishedAt` is converted from a number | `createdAt` is epoch **milliseconds**; left raw it sorts wrongly against the other platforms |
 | The primary key is `(ats, id)`, not `id` | Greenhouse ids are integers, Ashby/Lever UUIDs — a bare key risks silent cross-platform overwrites |
 | Greenhouse is queried without descriptions by default | `?content=true` is 26x the bytes; it is added only when `--grep` needs it |
+| Comeet is queried without `details` by default | `details=true` is ~3.8x the bytes; it is added only when `--grep` needs it |
 | Fuzzy match requires a ≥2-word title in the reverse direction | Without it, `--title "senior software engineer"` matches every job titled `Engineer` |
 | Only `--all` runs set `closed_at` | A filtered run cannot distinguish "gone" from "did not match my filter" |
 | Closing is scoped to boards actually scanned | Otherwise `--limit 10` would "close" postings at thousands of unvisited companies |
