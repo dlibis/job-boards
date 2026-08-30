@@ -676,6 +676,14 @@ def discover_boards(ats: str, concurrency: int = 8, recent_days: int | None = No
 # "Jobs at Ashley Digital" / "Job opportunities at ScyllaDB" -> the company.
 _BOARD_NAME_SUFFIX = re.compile(r"\s+jobs\s*$", re.IGNORECASE)
 _BOARD_NAME_PREFIX = re.compile(r"^\s*jobs?\s+(?:opportunities\s+)?at\s+", re.IGNORECASE)
+# What a board page says when it carries no company name at all: Ashby's candex
+# board titles itself simply "Jobs". Accepting that would ship "Jobs" as the
+# company, which is worse than showing nothing and letting the UI fall back.
+_BOARD_NAME_JUNK = frozenset({
+    "job", "jobs", "career", "careers", "open position", "open positions",
+    "opening", "openings", "vacancy", "vacancies", "home", "join us",
+    "work with us", "we are hiring", "current openings",
+})
 _META_CONTENT = '[\'"]{property}[\'"][^>]*content=[\'"]([^\'"]+)'
 _PAGE_TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
@@ -694,7 +702,9 @@ def company_name_from_board_page(html: str) -> str | None:
     if not raw:
         return None
     name = _BOARD_NAME_PREFIX.sub("", _BOARD_NAME_SUFFIX.sub("", raw)).strip()
-    return name or None
+    if not name or name.casefold() in _BOARD_NAME_JUNK:
+        return None
+    return name
 
 
 def board_company_metadata_batch(

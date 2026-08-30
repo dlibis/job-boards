@@ -1457,6 +1457,19 @@ def test_an_unreachable_page_keeps_the_name_the_api_already_gave():
         jb.fetch = original
 
 
+def test_a_board_page_with_no_company_name_yields_none_not_boilerplate():
+    """Ashby's candex board titles itself simply "Jobs".
+
+    Returning that would put "Jobs" in the company slot of a feed card, which
+    is worse than an absent name the UI can fall back on.
+    """
+    from job_boards import company_name_from_board_page as name
+    for boilerplate in ("Jobs", "Careers", "  open positions ", "Home", "We Are Hiring"):
+        assert name(f"<title>{boilerplate}</title>") is None, boilerplate
+    # A real name that merely contains the word survives.
+    assert name("<title>Jobandtalent</title>") == "Jobandtalent"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
