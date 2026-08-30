@@ -395,6 +395,65 @@ def normalize_comeet(job: dict) -> dict | None:
     }
 
 
+# Ashby's own frontend calls this to render a board page; found by inspecting
+# its network requests, not from published documentation. GraphQL introspection
+# on it is deliberately disabled, so `name` was found by testing candidate
+# field names against real boards rather than reading a schema: confirmed
+# clean data for 5 real corpus slugs (e.g. "compscience" -> "CompScience",
+# "appliedlabs" -> "Applied Labs" - better capitalization than any board-page
+# title could give), and a clean `{"organization": null}` for an unknown slug
+# rather than an error. No corresponding logo field was found after a
+# reasonable search; a logo still needs the board page's og:image.
+#
+# Being real and currently working does not make this a published contract:
+# Ashby can rename or remove it without notice. It is used only for the name,
+# and any failure here silently falls through to the board page, which already
+# carries the same name less precisely - so losing this endpoint degrades
+# quality, it does not lose the field.
+_ASHBY_ORGANIZATION_QUERY = (
+    "query X($n: String!) { organization: organizationFromHostedJobsPageName"
+    "(organizationHostedJobsPageName: $n) { name } }"
+)
+_ASHBY_GRAPHQL = "https://jobs.ashbyhq.com/api/non-user-graphql?op=X"
+
+
+_BOARD_NAME_JUNK = frozenset({
+    "job", "jobs", "career", "careers", "open position", "open positions",
+    "opening", "openings", "vacancy", "vacancies", "home", "join us",
+    "work with us", "we are hiring", "current openings",
+})
+_UUID_SHAPE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+)
+
+
+def _is_board_boilerplate(name: str) -> bool:
+    """True for generic board chrome or a raw ID standing in for a name.
+
+    Two real cases: Ashby's candex board titling itself just "Jobs", and
+    Ashby's amplitude board - both its page and its GraphQL API - returning
+    its own internal organization ID instead of a display name.
+    """
+    return name.casefold() in _BOARD_NAME_JUNK or bool(_UUID_SHAPE.match(name))
+
+
+def organization_name_from_ashby(slug: str) -> str | None:
+    """Ashby's company name for one board, via its internal GraphQL endpoint."""
+    body = json.dumps({"query": _ASHBY_ORGANIZATION_QUERY, "variables": {"n": slug}}).encode()
+    try:
+        payload = json.loads(fetch(_ASHBY_GRAPHQL, timeout=20, retries=2, method="POST", body=body))
+    except Exception:
+        return None
+    organization = (payload.get("data") or {}).get("organization") if isinstance(payload, dict) else None
+    name = organization.get("name") if isinstance(organization, dict) else None
+    if not isinstance(name, str):
+        return None
+    name = name.strip()
+    if not name or _is_board_boilerplate(name):
+        return None
+    return name
+
+
 SOURCES = {
     "ashby": {
         "board_page": "https://jobs.ashbyhq.com/{slug}",
@@ -405,6 +464,9 @@ SOURCES = {
         # Ashby returns descriptions whether or not we want them.
         "content_param": None,
         "junk_prefixes": ("root.",),
+        # Ashby's posting API carries no company field; the name comes from a
+        # separate internal endpoint instead of the generic board_api mechanism.
+        "company_name_resolver": organization_name_from_ashby,
     },
     "greenhouse": {
         "board_page": "https://job-boards.greenhouse.io/{slug}",
@@ -447,6 +509,11 @@ SOURCES = {
         "normalize": normalize_lever,
         "content_param": None,
         "junk_prefixes": (),
+        # No board_api / company_name_resolver: confirmed no separate branding
+        # or logo endpoint exists (jobs.lever.co/{slug}/logo and equivalents
+        # all 404), and the 900KB+ board page embeds no structured data (no
+        # schema.org JobPosting, no window.__data) - the page's own title is
+        # the only source Lever has, via company_name_from_board_page.
     },
     "comeet": {
         "domains": [],
@@ -668,52 +735,13 @@ def discover_boards(ats: str, concurrency: int = 8, recent_days: int | None = No
 # Company metadata
 #
 # A board is addressed by slug, and a slug is frequently not the brand
-# (`residenthome` is Ashley Digital), so the display name has to come from
-# somewhere else. Where that is differs by provider, and it was worth measuring
-# rather than assuming:
-#
-#   greenhouse  its board endpoint returns {"name": ...} in ~250 bytes
-#   comeet      company_name is already on every positions row - free
-#   ashby       nothing on the public posting-api (`jobs`, `apiVersion` only).
-#               Its board page calls an internal GraphQL endpoint
-#               (jobs.ashbyhq.com/api/non-user-graphql), but that is
-#               introspection-disabled and undocumented - a private
-#               implementation detail of Ashby's own frontend, not the
-#               contract this project builds on elsewhere. Guessing at its
-#               field names to depend on it would trade a stable, documented
-#               API for an unstable, private one. Board page instead.
-#   lever       nothing anywhere. Confirmed no separate branding/logo endpoint
-#               exists (jobs.lever.co/{slug}/logo and equivalents all 404),
-#               and the 900KB+ board page embeds no structured data (no
-#               schema.org JobPosting, no window.__data) - it is server-
-#               rendered HTML with nothing but the page itself to read.
-#
-# For both, the page is read through <title> and Open Graph tags specifically
-# - not an arbitrary DOM scrape. Those are the one part of a job board page a
-# provider has a standing incentive to keep correct and stable, since search
-# engines and link-preview unfurlers depend on exactly the same two fields.
-#
-# Logos come only from a board page's og:image, and Ashby publishes none at all,
-# so asking for a logo is what makes this expensive - Lever's pages are ~100KB.
-# Callers that only need the name should say so.
-#
-# None of this belongs in a scan either way: a company renames or re-brands
-# perhaps yearly, and a request per board per run would cost thousands for data
-# that never moved.
+# (`residenthome` is Ashley Digital) - see `company_name_from_board_api`,
+# `company_name_from_board_page`, and `board_company_metadata_batch` for how
+# and when it is resolved.
 # --------------------------------------------------------------------------- #
 
-# "Linear Jobs" -> Linear, "Palantir Technologies jobs" -> Palantir Technologies,
-# "Jobs at Ashley Digital" / "Job opportunities at ScyllaDB" -> the company.
 _BOARD_NAME_SUFFIX = re.compile(r"\s+jobs\s*$", re.IGNORECASE)
 _BOARD_NAME_PREFIX = re.compile(r"^\s*jobs?\s+(?:opportunities\s+)?at\s+", re.IGNORECASE)
-# What a board page says when it carries no company name at all: Ashby's candex
-# board titles itself simply "Jobs". Accepting that would ship "Jobs" as the
-# company, which is worse than showing nothing and letting the UI fall back.
-_BOARD_NAME_JUNK = frozenset({
-    "job", "jobs", "career", "careers", "open position", "open positions",
-    "opening", "openings", "vacancy", "vacancies", "home", "join us",
-    "work with us", "we are hiring", "current openings",
-})
 _META_CONTENT = '[\'"]{property}[\'"][^>]*content=[\'"]([^\'"]+)'
 _PAGE_TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
@@ -723,18 +751,33 @@ def _meta(html: str, prop: str) -> str | None:
     return unescape(match.group(1)).strip() if match else None
 
 
+def _strip_board_wording(raw: str) -> str:
+    """"Linear Jobs", "Jobs at Ashley Digital" -> "Linear", "Ashley Digital"."""
+    return _BOARD_NAME_PREFIX.sub("", _BOARD_NAME_SUFFIX.sub("", raw)).strip()
+
+
 def company_name_from_board_page(html: str) -> str | None:
-    """The brand a board belongs to, from its Open Graph title or page title."""
+    """The brand a board belongs to, from its Open Graph title or page title.
+
+    Reads only these two tags, never an arbitrary DOM scrape: they're the one
+    part of a job board page a provider has a standing incentive to keep
+    correct, since search engines and link-preview unfurlers depend on them.
+    """
     raw = _meta(html, "og:title")
     if not raw:
         title = _PAGE_TITLE.search(html)
         raw = unescape(title.group(1)).strip() if title else None
     if not raw:
         return None
-    name = _BOARD_NAME_PREFIX.sub("", _BOARD_NAME_SUFFIX.sub("", raw)).strip()
-    if not name or name.casefold() in _BOARD_NAME_JUNK:
+    name = _strip_board_wording(raw)
+    if not name or _is_board_boilerplate(name):
         return None
     return name
+
+
+def company_logo_from_board_page(html: str) -> str | None:
+    """A board's logo URL, from its Open Graph image tag - the only place one exists."""
+    return _meta(html, "og:image")
 
 
 def board_company_metadata_batch(
@@ -745,6 +788,10 @@ def board_company_metadata_batch(
     Sequentially this is one request per board across thousands of boards, which
     is tens of minutes of pure latency. Concurrency lives here rather than in the
     caller because 8 is this collector's network-etiquette cap, not a tunable.
+
+    Call this from discovery only, never per scan: a company renames or
+    re-brands perhaps yearly, so paying for this on every scan would cost
+    thousands of requests per run for data that never moved.
     """
     if not slugs:
         return {}
@@ -758,49 +805,19 @@ def board_company_metadata_batch(
     return found
 
 
-# Ashby's own frontend calls this to render a board page; found by inspecting
-# its network requests, not from published documentation. GraphQL introspection
-# on it is deliberately disabled, so `name` was found by testing candidate
-# field names against real boards rather than reading a schema: confirmed
-# clean data for 5 real corpus slugs (e.g. "compscience" -> "CompScience",
-# "appliedlabs" -> "Applied Labs" - better capitalization than any board-page
-# title could give), and a clean `{"organization": null}` for an unknown slug
-# rather than an error. No corresponding logo field was found after a
-# reasonable search; a logo still needs the board page's og:image.
-#
-# Being real and currently working does not make this a published contract:
-# Ashby can rename or remove it without notice. It is used only for the name,
-# and any failure here silently falls through to the board page, which already
-# carries the same name less precisely - so losing this endpoint degrades
-# quality, it does not lose the field.
-_ASHBY_ORGANIZATION_QUERY = (
-    "query X($n: String!) { organization: organizationFromHostedJobsPageName"
-    "(organizationHostedJobsPageName: $n) { name } }"
-)
-_ASHBY_GRAPHQL = "https://jobs.ashbyhq.com/api/non-user-graphql?op=X"
-
-
-def organization_name_from_ashby(slug: str) -> str | None:
-    """Ashby's company name for one board, via its internal GraphQL endpoint."""
-    body = json.dumps({"query": _ASHBY_ORGANIZATION_QUERY, "variables": {"n": slug}}).encode()
-    try:
-        payload = json.loads(fetch(_ASHBY_GRAPHQL, timeout=20, retries=2, method="POST", body=body))
-    except Exception:
-        return None
-    organization = (payload.get("data") or {}).get("organization") if isinstance(payload, dict) else None
-    name = organization.get("name") if isinstance(organization, dict) else None
-    return name.strip() or None if isinstance(name, str) else None
-
-
 def company_name_from_board_api(ats: str, slug: str) -> str | None:
     """The company name from a provider's own API, where one exists.
 
     Preferred over the board page wherever it exists: a declared field rather
     than a scraped tag, and for Greenhouse two orders of magnitude smaller.
+    Dispatch is purely data-driven off `SOURCES`: a provider either names a
+    `company_name_resolver` (Ashby) or a generic `board_api`/`board_api_name_key`
+    pair (Greenhouse) — this function knows about neither provider by name.
     """
-    if ats == "ashby":
-        return organization_name_from_ashby(slug)
     source = SOURCES.get(ats, {})
+    resolver = source.get("company_name_resolver")
+    if resolver:
+        return resolver(slug)
     api, key = source.get("board_api"), source.get("board_api_name_key")
     if not api or not key:
         return None
@@ -841,7 +858,7 @@ def board_company_metadata(ats: str, slug: str, want_logo: bool = True) -> dict:
     metadata.setdefault("company_name", company_name_from_board_page(html))
     if metadata.get("company_name") is None:
         metadata.pop("company_name")
-    logo = _meta(html, "og:image")
+    logo = company_logo_from_board_page(html)
     if logo:
         metadata["company_logo_url"] = logo
     return metadata

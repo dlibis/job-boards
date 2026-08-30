@@ -1423,6 +1423,21 @@ def test_an_unknown_ashby_slug_returns_none_not_an_error():
         jb.fetch = original
 
 
+def test_a_uuid_shaped_ashby_organization_name_is_rejected_not_stored():
+    """Real board "amplitude" returns its own internal org ID here instead of a
+    display name (confirmed live) - an ID is worse than no name at all.
+    """
+    import job_boards as jb
+    original = jb.fetch
+    jb.fetch = lambda *_a, **_k: (
+        b'{"data": {"organization": {"name": "9c26369c-d400-4eb7-a9b3-ab8f6469f9e8"}}}'
+    )
+    try:
+        assert jb.organization_name_from_ashby("amplitude") is None
+    finally:
+        jb.fetch = original
+
+
 def test_ashby_graphql_failure_falls_through_to_the_page():
     """This is a private, undocumented endpoint Ashby could change without
     notice. Losing it must degrade to the page, not fail the board.
