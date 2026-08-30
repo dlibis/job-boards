@@ -125,6 +125,10 @@ _POOLED_HOSTS = {
     "boards-api.greenhouse.io",
     "api.lever.co",
     "www.comeet.com",
+    # Not a posting API: Ashby's organization lookup and board-page fallback
+    # both hit this host once per board at company-metadata discovery, which is
+    # the same per-board volume the posting APIs see.
+    "jobs.ashbyhq.com",
 }
 # One connection per thread per host. Sharing across threads would need a lock and
 # serialise the pool; a thread-local dict keeps the 8 workers independent, so a full
@@ -144,7 +148,9 @@ def _lower_headers(items) -> dict:
     return {k.lower(): v for k, v in (items.items() if hasattr(items, "items") else items)}
 
 
-def _pooled_request(url: str, method: str, timeout: int, headers: dict) -> tuple[int, dict, bytes]:
+def _pooled_request(
+    url: str, method: str, timeout: int, headers: dict, body: bytes | None = None
+) -> tuple[int, dict, bytes]:
     """One request over a reused per-thread connection. Returns (status, headers, body).
 
     A pooled connection can be closed by the server between requests, which surfaces
@@ -164,10 +170,10 @@ def _pooled_request(url: str, method: str, timeout: int, headers: dict) -> tuple
                 parts.netloc, timeout=timeout
             )
         try:
-            conn.request(method, target, headers=headers)
+            conn.request(method, target, body=body, headers=headers)
             resp = conn.getresponse()
-            body = resp.read()  # must drain, or the connection cannot be reused
-            return resp.status, _lower_headers(resp.getheaders()), body
+            response_body = resp.read()  # must drain, or the connection cannot be reused
+            return resp.status, _lower_headers(resp.getheaders()), response_body
         except (http.client.HTTPException, OSError):
             try:
                 conn.close()
@@ -180,15 +186,18 @@ def _pooled_request(url: str, method: str, timeout: int, headers: dict) -> tuple
 
 
 def _single_request(
-    url: str, method: str, timeout: int, etag: str | None = None
+    url: str, method: str, timeout: int, etag: str | None = None,
+    body: bytes | None = None,
 ) -> tuple[int, dict, bytes]:
     """One request, pooled where that is safe and via urlopen everywhere else."""
     headers = {"User-Agent": UA, "Accept-Encoding": "gzip"}
     if etag:
         headers["If-None-Match"] = etag
+    if body is not None:
+        headers["Content-Type"] = "application/json"
     if urllib.parse.urlsplit(url).netloc in _POOLED_HOSTS:
-        return _pooled_request(url, method, timeout, headers)
-    req = urllib.request.Request(url, headers=headers, method=method)
+        return _pooled_request(url, method, timeout, headers, body)
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, _lower_headers(resp.headers), resp.read()
@@ -217,8 +226,13 @@ def fetch(
     method: str = "GET",
     etag: str | None = None,
     meta: dict | None = None,
+    body: bytes | None = None,
 ) -> bytes:
     """GET a URL, transparently gunzipping. Raises NotFound on 404.
+
+    `body` sends a request body (e.g. a GraphQL POST) as raw bytes; the caller
+    encodes it. Every other provider integration is GET-only, so this exists
+    solely for Ashby's organization lookup — see `organization_name_from_ashby`.
 
     Common Crawl's CDX index 502/504s under load often enough that a single
     attempt fails maybe half the time, so 5xx gets exponential backoff.
@@ -231,7 +245,7 @@ def fetch(
     """
     for attempt in range(retries):
         try:
-            status, headers, body = _single_request(url, method, timeout, etag)
+            status, headers, response_body = _single_request(url, method, timeout, etag, body)
             if meta is not None:
                 meta["etag"] = headers.get("etag")
             if status == 304:
@@ -253,8 +267,8 @@ def fetch(
             if status >= 400:
                 raise urllib.error.HTTPError(url, status, "client error", None, None)
             if headers.get("content-encoding") == "gzip":
-                body = gzip.decompress(body)
-            return body
+                response_body = gzip.decompress(response_body)
+            return response_body
         except (urllib.error.URLError, TimeoutError, http.client.HTTPException, OSError):
             if attempt == retries - 1:
                 raise
@@ -660,8 +674,24 @@ def discover_boards(ats: str, concurrency: int = 8, recent_days: int | None = No
 #
 #   greenhouse  its board endpoint returns {"name": ...} in ~250 bytes
 #   comeet      company_name is already on every positions row - free
-#   ashby       nothing; the posting API carries jobs only. Board page.
-#   lever       nothing; the payload is a bare array. Board page.
+#   ashby       nothing on the public posting-api (`jobs`, `apiVersion` only).
+#               Its board page calls an internal GraphQL endpoint
+#               (jobs.ashbyhq.com/api/non-user-graphql), but that is
+#               introspection-disabled and undocumented - a private
+#               implementation detail of Ashby's own frontend, not the
+#               contract this project builds on elsewhere. Guessing at its
+#               field names to depend on it would trade a stable, documented
+#               API for an unstable, private one. Board page instead.
+#   lever       nothing anywhere. Confirmed no separate branding/logo endpoint
+#               exists (jobs.lever.co/{slug}/logo and equivalents all 404),
+#               and the 900KB+ board page embeds no structured data (no
+#               schema.org JobPosting, no window.__data) - it is server-
+#               rendered HTML with nothing but the page itself to read.
+#
+# For both, the page is read through <title> and Open Graph tags specifically
+# - not an arbitrary DOM scrape. Those are the one part of a job board page a
+# provider has a standing incentive to keep correct and stable, since search
+# engines and link-preview unfurlers depend on exactly the same two fields.
 #
 # Logos come only from a board page's og:image, and Ashby publishes none at all,
 # so asking for a logo is what makes this expensive - Lever's pages are ~100KB.
@@ -728,13 +758,48 @@ def board_company_metadata_batch(
     return found
 
 
-def company_name_from_board_api(ats: str, slug: str) -> str | None:
-    """The company name from a provider's own board endpoint, where one exists.
+# Ashby's own frontend calls this to render a board page; found by inspecting
+# its network requests, not from published documentation. GraphQL introspection
+# on it is deliberately disabled, so `name` was found by testing candidate
+# field names against real boards rather than reading a schema: confirmed
+# clean data for 5 real corpus slugs (e.g. "compscience" -> "CompScience",
+# "appliedlabs" -> "Applied Labs" - better capitalization than any board-page
+# title could give), and a clean `{"organization": null}` for an unknown slug
+# rather than an error. No corresponding logo field was found after a
+# reasonable search; a logo still needs the board page's og:image.
+#
+# Being real and currently working does not make this a published contract:
+# Ashby can rename or remove it without notice. It is used only for the name,
+# and any failure here silently falls through to the board page, which already
+# carries the same name less precisely - so losing this endpoint degrades
+# quality, it does not lose the field.
+_ASHBY_ORGANIZATION_QUERY = (
+    "query X($n: String!) { organization: organizationFromHostedJobsPageName"
+    "(organizationHostedJobsPageName: $n) { name } }"
+)
+_ASHBY_GRAPHQL = "https://jobs.ashbyhq.com/api/non-user-graphql?op=X"
 
-    Only Greenhouse publishes this. It is preferred over the board page because
-    it is a declared JSON field rather than a scraped tag, and two orders of
-    magnitude smaller.
+
+def organization_name_from_ashby(slug: str) -> str | None:
+    """Ashby's company name for one board, via its internal GraphQL endpoint."""
+    body = json.dumps({"query": _ASHBY_ORGANIZATION_QUERY, "variables": {"n": slug}}).encode()
+    try:
+        payload = json.loads(fetch(_ASHBY_GRAPHQL, timeout=20, retries=2, method="POST", body=body))
+    except Exception:
+        return None
+    organization = (payload.get("data") or {}).get("organization") if isinstance(payload, dict) else None
+    name = organization.get("name") if isinstance(organization, dict) else None
+    return name.strip() or None if isinstance(name, str) else None
+
+
+def company_name_from_board_api(ats: str, slug: str) -> str | None:
+    """The company name from a provider's own API, where one exists.
+
+    Preferred over the board page wherever it exists: a declared field rather
+    than a scraped tag, and for Greenhouse two orders of magnitude smaller.
     """
+    if ats == "ashby":
+        return organization_name_from_ashby(slug)
     source = SOURCES.get(ats, {})
     api, key = source.get("board_api"), source.get("board_api_name_key")
     if not api or not key:

@@ -255,7 +255,7 @@ def test_a_304_skips_the_board():
     """The whole point: an unchanged board costs no body at all."""
     import job_boards as jb
     original = jb._single_request
-    jb._single_request = lambda u, m, t, e=None: (304, {"etag": e}, b"")
+    jb._single_request = lambda u, m, t, e=None, b=None: (304, {"etag": e}, b"")
     try:
         raised = False
         try:
@@ -283,7 +283,7 @@ def test_conditional_request_sends_if_none_match():
     import job_boards as jb
     seen = {}
 
-    def fake_pooled(url, method, timeout, headers):
+    def fake_pooled(url, method, timeout, headers, body=None):
         seen.update(headers)
         return 200, {}, b"{}"
 
@@ -314,7 +314,7 @@ def test_header_lookup_is_case_insensitive():
     payload = gziplib.compress(b'{"jobs": []}')
     for header_name in ("Content-Encoding", "content-encoding", "CONTENT-ENCODING"):
         original = jb._single_request
-        jb._single_request = lambda u, m, t, e=None, _h=header_name: (
+        jb._single_request = lambda u, m, t, e=None, b=None, _h=header_name: (
             200, jb._lower_headers([(_h, "gzip")]), payload
         )
         try:
@@ -339,7 +339,7 @@ def test_pooled_request_retries_once_on_a_dead_connection():
         def __init__(self, host, timeout=None):
             self.host = host
             attempts.append(host)
-        def request(self, method, target, headers=None):
+        def request(self, method, target, headers=None, body=None):
             if len(attempts) == 1:      # the first, stale connection fails
                 raise http.client.RemoteDisconnected("closed by server")
         def getresponse(self):
@@ -1124,7 +1124,7 @@ def test_a_throttled_board_is_retried_not_dropped():
         for status in (429, 403):
             calls = []
 
-            def refuse_twice(u, m, t, e=None, _s=status, _calls=calls):
+            def refuse_twice(u, m, t, e=None, b=None, _s=status, _calls=calls):
                 _calls.append(1)
                 if len(_calls) <= 2:
                     return _s, {}, b""
@@ -1137,7 +1137,7 @@ def test_a_throttled_board_is_retried_not_dropped():
 
         calls = []
 
-        def always_404(u, m, t, e=None, _calls=calls):
+        def always_404(u, m, t, e=None, b=None, _calls=calls):
             _calls.append(1)
             return 404, {}, b""
 
@@ -1381,6 +1381,69 @@ def test_board_metadata_absence_never_blocks_collection():
         assert jb.board_company_metadata("ashby", "linear") == {}
     finally:
         jb.fetch = original
+
+
+def test_ashby_organization_name_is_read_via_its_internal_graphql_call():
+    """Field name found by testing real slugs against real boards, not from docs:
+
+    compscience -> CompScience, appliedlabs -> Applied Labs - better
+    capitalization than any title-tag stripping could produce.
+    """
+    import job_boards as jb
+    calls = []
+
+    def fetch(url, *_a, method="GET", body=None, **_k):
+        calls.append((url, method, body))
+        return b'{"data": {"organization": {"name": "CompScience"}}}'
+
+    original = jb.fetch
+    jb.fetch = fetch
+    try:
+        found = jb.organization_name_from_ashby("compscience")
+        api_found = jb.board_company_metadata("ashby", "compscience", want_logo=False)
+    finally:
+        jb.fetch = original
+    assert found == "CompScience"
+    assert api_found == {"company_name": "CompScience"}
+    (url, method, body) = calls[0]
+    assert method == "POST" and "non-user-graphql" in url
+    assert b"compscience" in body
+
+
+def test_an_unknown_ashby_slug_returns_none_not_an_error():
+    """The endpoint answers {"organization": null} for a slug it doesn't know,
+    same shape as any other absence in this collector - never an exception.
+    """
+    import job_boards as jb
+    original = jb.fetch
+    jb.fetch = lambda *_a, **_k: b'{"data": {"organization": null}}'
+    try:
+        assert jb.organization_name_from_ashby("does-not-exist") is None
+    finally:
+        jb.fetch = original
+
+
+def test_ashby_graphql_failure_falls_through_to_the_page():
+    """This is a private, undocumented endpoint Ashby could change without
+    notice. Losing it must degrade to the page, not fail the board.
+    """
+    import job_boards as jb
+    calls = []
+
+    def fetch(url, *_a, **_k):
+        calls.append(url)
+        if "non-user-graphql" in url:
+            raise RuntimeError("endpoint changed shape")
+        return b"<title>Linear Jobs</title>"
+
+    original = jb.fetch
+    jb.fetch = fetch
+    try:
+        found = jb.board_company_metadata("ashby", "linear", want_logo=False)
+    finally:
+        jb.fetch = original
+    assert found == {"company_name": "Linear"}
+    assert len(calls) == 2
 
 
 def test_greenhouse_company_name_comes_from_its_board_api_not_the_page():
