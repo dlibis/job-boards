@@ -394,6 +394,12 @@ SOURCES = {
     },
     "greenhouse": {
         "board_page": "https://job-boards.greenhouse.io/{slug}",
+        # The board endpoint (no /jobs) answers {"name": "Ashley Digital"} in
+        # ~250 bytes. The board page carries the same name in an og: tag but
+        # costs ~14KB and ~5x the latency, so the API wins whenever only the
+        # name is wanted. Neither Ashby nor Lever publishes an equivalent.
+        "board_api": "https://boards-api.greenhouse.io/v1/boards/{slug}",
+        "board_api_name_key": "name",
         # The *.eu.* pair is Greenhouse's EU-region board host, mirroring the US
         # pair: boards.eu -> job-boards.eu, exactly as boards -> job-boards. Only
         # the public board page is regionalised — there is no
@@ -647,12 +653,23 @@ def discover_boards(ats: str, concurrency: int = 8, recent_days: int | None = No
 # --------------------------------------------------------------------------- #
 # Company metadata
 #
-# The posting APIs carry jobs, not the company behind them: a board is addressed
-# by slug, and a slug is frequently not the brand (`residenthome` is Ashley
-# Digital). The public board page does carry both, in its Open Graph tags, so
-# this reads it once per board at discovery. It is deliberately not part of a
-# scan: a company renames or changes its logo perhaps yearly, and paying a
-# request per board on every run would cost thousands for data that never moved.
+# A board is addressed by slug, and a slug is frequently not the brand
+# (`residenthome` is Ashley Digital), so the display name has to come from
+# somewhere else. Where that is differs by provider, and it was worth measuring
+# rather than assuming:
+#
+#   greenhouse  its board endpoint returns {"name": ...} in ~250 bytes
+#   comeet      company_name is already on every positions row - free
+#   ashby       nothing; the posting API carries jobs only. Board page.
+#   lever       nothing; the payload is a bare array. Board page.
+#
+# Logos come only from a board page's og:image, and Ashby publishes none at all,
+# so asking for a logo is what makes this expensive - Lever's pages are ~100KB.
+# Callers that only need the name should say so.
+#
+# None of this belongs in a scan either way: a company renames or re-brands
+# perhaps yearly, and a request per board per run would cost thousands for data
+# that never moved.
 # --------------------------------------------------------------------------- #
 
 # "Linear Jobs" -> Linear, "Palantir Technologies jobs" -> Palantir Technologies,
@@ -680,25 +697,75 @@ def company_name_from_board_page(html: str) -> str | None:
     return name or None
 
 
-def board_company_metadata(ats: str, slug: str) -> dict:
-    """Read one board page for its company display name and logo URL.
+def board_company_metadata_batch(
+    ats: str, slugs: list[str], concurrency: int = 8, want_logo: bool = True
+) -> dict[str, dict]:
+    """Resolve company metadata for many boards at the collector's own concurrency.
+
+    Sequentially this is one request per board across thousands of boards, which
+    is tens of minutes of pure latency. Concurrency lives here rather than in the
+    caller because 8 is this collector's network-etiquette cap, not a tunable.
+    """
+    if not slugs:
+        return {}
+    print(f"{ats}: resolving company metadata for {len(slugs)} boards", file=sys.stderr)
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        resolved = pool.map(
+            lambda slug: board_company_metadata(ats, slug, want_logo), slugs
+        )
+    found = {slug: metadata for slug, metadata in zip(slugs, resolved) if metadata}
+    print(f"  {len(found)} boards published company metadata", file=sys.stderr)
+    return found
+
+
+def company_name_from_board_api(ats: str, slug: str) -> str | None:
+    """The company name from a provider's own board endpoint, where one exists.
+
+    Only Greenhouse publishes this. It is preferred over the board page because
+    it is a declared JSON field rather than a scraped tag, and two orders of
+    magnitude smaller.
+    """
+    source = SOURCES.get(ats, {})
+    api, key = source.get("board_api"), source.get("board_api_name_key")
+    if not api or not key:
+        return None
+    try:
+        payload = json.loads(fetch(api.format(slug=urllib.parse.quote(slug)), timeout=25, retries=2))
+    except Exception:
+        return None
+    name = payload.get(key) if isinstance(payload, dict) else None
+    return name.strip() or None if isinstance(name, str) else None
+
+
+def board_company_metadata(ats: str, slug: str, want_logo: bool = True) -> dict:
+    """Company display name and logo URL for one board.
 
     Returns `{}` rather than raising: company metadata is presentation detail,
     and a board whose page is unreachable must still be collectable. Ashby
-    publishes no logo at all, so an absent `logo_url` is normal, not a failure.
+    publishes no logo at all, so an absent logo is normal, not a failure.
+
+    `want_logo=False` takes the cheap path wherever a provider's API carries the
+    name, skipping the board page entirely. Logos only exist in page markup, so
+    asking for one costs a full page fetch regardless of provider.
     """
+    metadata = {}
+    name = company_name_from_board_api(ats, slug)
+    if name:
+        metadata["company_name"] = name
+        if not want_logo:
+            return metadata
+
     page = SOURCES.get(ats, {}).get("board_page")
     if not page:
-        return {}
+        return metadata
     try:
         html = fetch(page.format(slug=urllib.parse.quote(slug)), timeout=25, retries=2)
     except Exception:
-        return {}
+        return metadata  # keep whatever the API already gave us
     html = html.decode("utf-8", "ignore")
-    metadata = {}
-    name = company_name_from_board_page(html)
-    if name:
-        metadata["company_name"] = name
+    metadata.setdefault("company_name", company_name_from_board_page(html))
+    if metadata.get("company_name") is None:
+        metadata.pop("company_name")
     logo = _meta(html, "og:image")
     if logo:
         metadata["company_logo_url"] = logo

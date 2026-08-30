@@ -1383,6 +1383,80 @@ def test_board_metadata_absence_never_blocks_collection():
         jb.fetch = original
 
 
+def test_greenhouse_company_name_comes_from_its_board_api_not_the_page():
+    """Measured: ~250 bytes and 0.3s against ~14KB and 1.4s for the same name."""
+    import job_boards as jb
+    calls = []
+
+    def fetch(url, *_a, **_k):
+        calls.append(url)
+        return b'{"name": "Ashley Digital", "content": ""}'
+
+    original = jb.fetch
+    jb.fetch = fetch
+    try:
+        found = jb.board_company_metadata("greenhouse", "residenthome", want_logo=False)
+    finally:
+        jb.fetch = original
+    assert found == {"company_name": "Ashley Digital"}, found
+    assert len(calls) == 1 and "boards-api" in calls[0], calls
+
+
+def test_providers_without_a_board_api_fall_back_to_the_page():
+    """Ashby and Lever publish no company field on their posting APIs."""
+    import job_boards as jb
+    assert jb.SOURCES["ashby"].get("board_api") is None
+    assert jb.SOURCES["lever"].get("board_api") is None
+    original = jb.fetch
+    jb.fetch = lambda *_a, **_k: b"<title>Linear Jobs</title>"
+    try:
+        assert jb.board_company_metadata("ashby", "linear", want_logo=False) == {
+            "company_name": "Linear"
+        }
+    finally:
+        jb.fetch = original
+
+
+def test_a_logo_always_costs_the_board_page():
+    """Logos live only in page markup, so want_logo forces the page fetch."""
+    import job_boards as jb
+    calls = []
+
+    def fetch(url, *_a, **_k):
+        calls.append(url)
+        if "boards-api" in url:
+            return b'{"name": "Ashley Digital"}'
+        return b'<meta property="og:image" content="https://cdn.example/a.png">'
+
+    original = jb.fetch
+    jb.fetch = fetch
+    try:
+        found = jb.board_company_metadata("greenhouse", "residenthome", want_logo=True)
+    finally:
+        jb.fetch = original
+    assert found["company_name"] == "Ashley Digital"
+    assert found["company_logo_url"] == "https://cdn.example/a.png"
+    assert len(calls) == 2, calls
+
+
+def test_an_unreachable_page_keeps_the_name_the_api_already_gave():
+    import job_boards as jb
+    original = jb.fetch
+
+    def fetch(url, *_a, **_k):
+        if "boards-api" in url:
+            return b'{"name": "Ashley Digital"}'
+        raise RuntimeError("page unreachable")
+
+    jb.fetch = fetch
+    try:
+        assert jb.board_company_metadata("greenhouse", "residenthome") == {
+            "company_name": "Ashley Digital"
+        }
+    finally:
+        jb.fetch = original
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
