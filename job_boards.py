@@ -46,7 +46,7 @@ from datetime import datetime, timedelta, timezone
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from html import unescape
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -736,11 +736,39 @@ def board_exists(ats: str, slug: str) -> bool:
         return False  # transient failure: drop it, the next refresh can find it
 
 
-_DISCOVERY_BATCH_SIZE = 300
+def _bounded_stream(items, worker, concurrency: int = 8):
+    """Run `worker(item)` over `items` with at most `concurrency` in flight,
+    on ONE thread pool held open for the whole call, yielding `(item, result)`
+    as each finishes (completion order, not submission order).
+
+    This is what keeps `_CONNECTIONS`' per-thread connection reuse intact:
+    the 8 worker threads here are the same 8 for the entire stream, so a full
+    run still opens ~8 connections per host, not 8 for every sub-batch. An
+    earlier version of this rebatched into fresh `ThreadPoolExecutor`s every
+    few hundred items, which meant a fresh set of TLS handshakes at every
+    batch boundary -- and that bursty a connection pattern is exactly what
+    trips a server's own abuse/rate-limit heuristics, observed in production
+    as requests eating this project's 30-second capped backoff repeatedly.
+    Do not reintroduce per-batch pools here.
+    """
+    items = iter(items)
+    _UNSET = object()
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = {}
+        for item in itertools.islice(items, concurrency):
+            futures[pool.submit(worker, item)] = item
+        while futures:
+            done, _pending = wait(futures, return_when=FIRST_COMPLETED)
+            for future in done:
+                item = futures.pop(future)
+                yield item, future.result()
+                next_item = next(items, _UNSET)
+                if next_item is not _UNSET:
+                    futures[pool.submit(worker, next_item)] = next_item
 
 
 def discover_boards(
-    ats: str, concurrency: int = 8, recent_days: int | None = None, batch_size: int = _DISCOVERY_BATCH_SIZE
+    ats: str, concurrency: int = 8, recent_days: int | None = None
 ) -> Iterator[str]:
     """Find board slugs for one ATS: harvest candidates, then validate each.
 
@@ -749,16 +777,12 @@ def discover_boards(
     archive's ~48-day median capture lag. Measured at ~4 minutes against ~26 for the
     full crawl, and purely additive: one run added 14 boards and lost none.
 
-    A generator: candidates are validated in bounded batches of `batch_size`,
-    each batch's own thread pool (`concurrency` wide) fully shutting down
-    before the next batch's opens, and live slugs are yielded via
-    `as_completed()` as each batch's checks finish -- rather than blocking on
-    the whole candidate list before returning anything. This keeps the shared
-    concurrency budget (see this project's README: "capped at 8 concurrent")
-    from ever exceeding `concurrency` in flight, and lets a caller start
-    working with the first live slugs long before the last candidate has been
-    checked. Callers that need the complete set up front (e.g. writing a
-    cache file) can simply wrap a call in `list(...)`.
+    A generator: candidates are validated on one persistent thread pool (see
+    `_bounded_stream`), with at most `concurrency` in flight, and live slugs
+    are yielded as each validates -- rather than blocking on the whole
+    candidate list before returning anything. Callers that need the complete
+    set up front (e.g. writing a cache file) can simply wrap a call in
+    `list(...)`.
     """
     domains = SOURCES[ats]["domains"]
     print(f"{ats}: discovering boards", file=sys.stderr)
@@ -778,16 +802,11 @@ def discover_boards(
 
     live_count = 0
     yielded: set[str] = set()
-    for start in range(0, len(candidates), batch_size):
-        batch = candidates[start : start + batch_size]
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = {pool.submit(board_exists, ats, slug): slug for slug in batch}
-            for future in as_completed(futures):
-                slug = futures[future]
-                if future.result():
-                    live_count += 1
-                    yielded.add(slug.lower())
-                    yield slug
+    for slug, ok in _bounded_stream(candidates, lambda s: board_exists(ats, s), concurrency):
+        if ok:
+            live_count += 1
+            yielded.add(slug.lower())
+            yield slug
     print(f"  {live_count} live boards ({len(candidates) - live_count} dead)", file=sys.stderr)
 
     # Discovery only sees what the archive captured, so a real board that was never
@@ -858,7 +877,6 @@ def board_company_metadata_batch(
     slugs: Iterable[str],
     concurrency: int = 8,
     want_logo: bool = True,
-    batch_size: int = _DISCOVERY_BATCH_SIZE,
 ) -> Iterator[tuple[str, dict]]:
     """Resolve company metadata for many boards at the collector's own concurrency.
 
@@ -870,33 +888,23 @@ def board_company_metadata_batch(
     re-brands perhaps yearly, so paying for this on every scan would cost
     thousands of requests per run for data that never moved.
 
-    A generator: pulls `slugs` lazily in bounded batches of `batch_size` (so
-    passing a generator here -- e.g. `discover_boards()`'s own output -- never
-    forces the whole upstream discovery to finish first), and yields every
-    slug's `(slug, metadata)` pair via `as_completed()` as its batch's checks
-    finish, `metadata` an empty dict when nothing was published. Every slug is
-    yielded exactly once, whether or not metadata was found, so a caller can
-    build one board per slug without separately tracking coverage.
+    A generator: pulls `slugs` lazily (so passing a generator here -- e.g.
+    `discover_boards()`'s own output -- never forces the whole upstream
+    discovery to finish first) onto one persistent thread pool (see
+    `_bounded_stream`), and yields every slug's `(slug, metadata)` pair as its
+    lookup finishes, `metadata` an empty dict when nothing was published.
+    Every slug is yielded exactly once, whether or not metadata was found, so
+    a caller can build one board per slug without separately tracking coverage.
     """
-    slug_iter = iter(slugs)
+    print(f"{ats}: resolving company metadata for boards as they're discovered", file=sys.stderr)
     resolved_count = found_count = 0
-    while True:
-        batch = list(itertools.islice(slug_iter, batch_size))
-        if not batch:
-            break
-        if resolved_count == 0:
-            print(f"{ats}: resolving company metadata for boards as they're discovered", file=sys.stderr)
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = {
-                pool.submit(board_company_metadata, ats, slug, want_logo): slug for slug in batch
-            }
-            for future in as_completed(futures):
-                slug = futures[future]
-                metadata = future.result()
-                resolved_count += 1
-                if metadata:
-                    found_count += 1
-                yield slug, metadata
+    for slug, metadata in _bounded_stream(
+        slugs, lambda s: board_company_metadata(ats, s, want_logo), concurrency
+    ):
+        resolved_count += 1
+        if metadata:
+            found_count += 1
+        yield slug, metadata
     if resolved_count:
         print(f"  {found_count}/{resolved_count} boards published company metadata", file=sys.stderr)
 
