@@ -34,6 +34,7 @@ import csv
 from dataclasses import dataclass
 import gzip
 import http.client
+import itertools
 import json
 import os
 import re
@@ -45,9 +46,10 @@ from datetime import datetime, timedelta, timezone
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from html import unescape
 from pathlib import Path
+from typing import Iterable, Iterator
 
 HERE = Path(__file__).parent
 # Two files on purpose. The seed is small, curated and committed, so a fresh clone
@@ -734,13 +736,29 @@ def board_exists(ats: str, slug: str) -> bool:
         return False  # transient failure: drop it, the next refresh can find it
 
 
-def discover_boards(ats: str, concurrency: int = 8, recent_days: int | None = None) -> list[str]:
+_DISCOVERY_BATCH_SIZE = 300
+
+
+def discover_boards(
+    ats: str, concurrency: int = 8, recent_days: int | None = None, batch_size: int = _DISCOVERY_BATCH_SIZE
+) -> Iterator[str]:
     """Find board slugs for one ATS: harvest candidates, then validate each.
 
     `recent_days` switches to the cheap mode: only archive captures from that window,
     plus urlscan.io, which indexes scans run today rather than waiting on the
     archive's ~48-day median capture lag. Measured at ~4 minutes against ~26 for the
     full crawl, and purely additive: one run added 14 boards and lost none.
+
+    A generator: candidates are validated in bounded batches of `batch_size`,
+    each batch's own thread pool (`concurrency` wide) fully shutting down
+    before the next batch's opens, and live slugs are yielded via
+    `as_completed()` as each batch's checks finish -- rather than blocking on
+    the whole candidate list before returning anything. This keeps the shared
+    concurrency budget (see this project's README: "capped at 8 concurrent")
+    from ever exceeding `concurrency` in flight, and lets a caller start
+    working with the first live slugs long before the last candidate has been
+    checked. Callers that need the complete set up front (e.g. writing a
+    cache file) can simply wrap a call in `list(...)`.
     """
     domains = SOURCES[ats]["domains"]
     print(f"{ats}: discovering boards", file=sys.stderr)
@@ -757,23 +775,33 @@ def discover_boards(ats: str, concurrency: int = 8, recent_days: int | None = No
 
     candidates = sorted((s for s in seen.values() if plausible(s, ats)), key=str.lower)
     print(f"  validating {len(candidates)} plausible slugs...", file=sys.stderr)
-    with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        live = [
-            s for s, ok in zip(candidates, pool.map(lambda x: board_exists(ats, x), candidates))
-            if ok
-        ]
-    print(f"  {len(live)} live boards ({len(candidates) - len(live)} dead)", file=sys.stderr)
+
+    live_count = 0
+    yielded: set[str] = set()
+    for start in range(0, len(candidates), batch_size):
+        batch = candidates[start : start + batch_size]
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = {pool.submit(board_exists, ats, slug): slug for slug in batch}
+            for future in as_completed(futures):
+                slug = futures[future]
+                if future.result():
+                    live_count += 1
+                    yielded.add(slug.lower())
+                    yield slug
+    print(f"  {live_count} live boards ({len(candidates) - live_count} dead)", file=sys.stderr)
 
     # Discovery only sees what the archive captured, so a real board that was never
     # crawled is invisible to it. Union in every slug already known-good rather than
     # letting a refresh lose boards an earlier run had.
-    known = {s.lower(): s for s in live}
+    known_extra = 0
     for path in (BOARDS_SEED, BOARDS_CACHE):
         for slug in _read_boards(path).get(ats, []):
-            known.setdefault(slug.lower(), slug)
-    if len(known) > len(live):
-        print(f"  +{len(known) - len(live)} from seed/previous runs", file=sys.stderr)
-    return sorted(known.values(), key=str.lower)
+            if slug.lower() not in yielded:
+                yielded.add(slug.lower())
+                known_extra += 1
+                yield slug
+    if known_extra:
+        print(f"  +{known_extra} from seed/previous runs", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------- #
@@ -826,8 +854,12 @@ def company_logo_from_board_page(html: str) -> str | None:
 
 
 def board_company_metadata_batch(
-    ats: str, slugs: list[str], concurrency: int = 8, want_logo: bool = True
-) -> dict[str, dict]:
+    ats: str,
+    slugs: Iterable[str],
+    concurrency: int = 8,
+    want_logo: bool = True,
+    batch_size: int = _DISCOVERY_BATCH_SIZE,
+) -> Iterator[tuple[str, dict]]:
     """Resolve company metadata for many boards at the collector's own concurrency.
 
     Sequentially this is one request per board across thousands of boards, which
@@ -837,17 +869,36 @@ def board_company_metadata_batch(
     Call this from discovery only, never per scan: a company renames or
     re-brands perhaps yearly, so paying for this on every scan would cost
     thousands of requests per run for data that never moved.
+
+    A generator: pulls `slugs` lazily in bounded batches of `batch_size` (so
+    passing a generator here -- e.g. `discover_boards()`'s own output -- never
+    forces the whole upstream discovery to finish first), and yields every
+    slug's `(slug, metadata)` pair via `as_completed()` as its batch's checks
+    finish, `metadata` an empty dict when nothing was published. Every slug is
+    yielded exactly once, whether or not metadata was found, so a caller can
+    build one board per slug without separately tracking coverage.
     """
-    if not slugs:
-        return {}
-    print(f"{ats}: resolving company metadata for {len(slugs)} boards", file=sys.stderr)
-    with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        resolved = pool.map(
-            lambda slug: board_company_metadata(ats, slug, want_logo), slugs
-        )
-    found = {slug: metadata for slug, metadata in zip(slugs, resolved) if metadata}
-    print(f"  {len(found)} boards published company metadata", file=sys.stderr)
-    return found
+    slug_iter = iter(slugs)
+    resolved_count = found_count = 0
+    while True:
+        batch = list(itertools.islice(slug_iter, batch_size))
+        if not batch:
+            break
+        if resolved_count == 0:
+            print(f"{ats}: resolving company metadata for boards as they're discovered", file=sys.stderr)
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = {
+                pool.submit(board_company_metadata, ats, slug, want_logo): slug for slug in batch
+            }
+            for future in as_completed(futures):
+                slug = futures[future]
+                metadata = future.result()
+                resolved_count += 1
+                if metadata:
+                    found_count += 1
+                yield slug, metadata
+    if resolved_count:
+        print(f"  {found_count}/{resolved_count} boards published company metadata", file=sys.stderr)
 
 
 def company_name_from_board_api(ats: str, slug: str) -> str | None:
@@ -942,7 +993,35 @@ def comeet_candidates(since_days: int | None = None) -> dict[str, str]:
         if match and not _COMEET_UID_SHAPE.match(match.group(1)):
             seen.setdefault(match.group(1).lower(), match.group(2).upper())
     print(f"    {len(rows) - 1} archived URLs -> {len(seen)} candidates", file=sys.stderr)
-    return seen
+
+    # The archive only has what it has crawled, so a real board it never reached
+    # is invisible here. Union in every slug/uid a seed entry or earlier run
+    # already knows, the same way the three slug-based platforms do.
+    known = dict(seen)
+    for path in (BOARDS_SEED, BOARDS_CACHE):
+        for slug, uid in _read_comeet_seed(path).items():
+            known.setdefault(slug, uid)
+    if len(known) > len(seen):
+        print(f"  +{len(known) - len(seen)} from seed/previous runs", file=sys.stderr)
+    return known
+
+
+def _read_comeet_seed(path: Path) -> dict[str, str]:
+    """Read `{slug: company_uid}` for Comeet from a board file.
+
+    A Comeet board needs both identifiers to be addressable, unlike the flat
+    slug lists the other three platforms use, so its seed entries are objects
+    rather than bare strings.
+    """
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text())
+    if isinstance(data, list):
+        return {}  # the pre-multi-ATS flat list predates Comeet
+    return {
+        entry["slug"].lower(): entry["company_uid"].upper()
+        for entry in data.get("comeet", [])
+    }
 
 
 def comeet_board_metadata(slug: str, company_uid: str) -> dict | None:
@@ -1069,9 +1148,11 @@ def load_boards(
     boards = _read_boards(BOARDS_CACHE)
     for ats in ats_list:
         try:
-            boards[ats] = discover_boards(
+            # discover_boards() is a generator; the CLI needs the complete set
+            # up front to write it to the cache file, so consume it fully here.
+            boards[ats] = list(discover_boards(
                 ats, concurrency, recent_days=RECENT_WINDOW_DAYS if recent else None
-            )
+            ))
         except RateLimited:
             sys.exit(
                 "Common Crawl returned 503: request rate too high. Their docs say to "

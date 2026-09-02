@@ -1225,9 +1225,20 @@ def test_retry_after_beats_the_exponential_delay_but_is_capped():
     assert _retry_delay("3600", 0) == 30.0, "an absurd Retry-After is capped"
 
 
+def _no_comeet_seed():
+    """An empty seed/cache pair, for tests that assert an exact candidate set.
+
+    Real Comeet seed entries in boards.seed.json would otherwise union into
+    every one of these results, coupling unrelated tests to production data.
+    """
+    import job_boards as jb
+    empty_dir = Path(tempfile.mkdtemp())
+    return jb, (empty_dir / "boards.seed.json"), (empty_dir / "boards.json")
+
+
 def test_comeet_candidates_reads_the_slug_from_the_second_path_segment():
     """Comeet nests the slug under /jobs/, unlike the other three platforms."""
-    import job_boards as jb
+    jb, seed_path, cache_path = _no_comeet_seed()
     # CDX with fl=original returns one column per row, header first.
     rows = [
         ["original"],
@@ -1237,17 +1248,65 @@ def test_comeet_candidates_reads_the_slug_from_the_second_path_segment():
         ["https://www.comeet.com/jobs/4A.004/4A.004"],   # uid in slug position: junk
         ["https://www.comeet.com/about"],                # not a board at all
     ]
-    original = jb.fetch
+    original_fetch, original_seed, original_cache = jb.fetch, jb.BOARDS_SEED, jb.BOARDS_CACHE
     jb.fetch = lambda *_a, **_k: json.dumps(rows).encode()
+    jb.BOARDS_SEED, jb.BOARDS_CACHE = seed_path, cache_path
     try:
         found = jb.comeet_candidates()
     finally:
-        jb.fetch = original
+        jb.fetch, jb.BOARDS_SEED, jb.BOARDS_CACHE = original_fetch, original_seed, original_cache
     assert found == {
         "israeltechguard": "29.009",
         "scylladb": "E4.006",
         "acme corp": "AB.123",
     }, found
+
+
+def test_comeet_candidates_unions_seed_entries_the_archive_never_crawled():
+    """A board the Wayback Machine hasn't indexed yet is invisible without this.
+
+    Mirrors the seed union the three slug-based platforms already get in
+    `discover_boards`: a curated entry in boards.seed.json is permanent from
+    the next run, independent of archive crawl lag.
+    """
+    import job_boards as jb
+    rows = [["original"], ["https://www.comeet.com/jobs/known/AA.001"]]
+    seed_dir = Path(tempfile.mkdtemp())
+    seed_path = seed_dir / "boards.seed.json"
+    seed_path.write_text(json.dumps({
+        "comeet": [{"slug": "NagomiSecurity", "company_uid": "89.00B"}]
+    }))
+    cache_path = seed_dir / "boards.json"  # deliberately absent
+
+    original_fetch, original_seed, original_cache = jb.fetch, jb.BOARDS_SEED, jb.BOARDS_CACHE
+    jb.fetch = lambda *_a, **_k: json.dumps(rows).encode()
+    jb.BOARDS_SEED, jb.BOARDS_CACHE = seed_path, cache_path
+    try:
+        found = jb.comeet_candidates()
+    finally:
+        jb.fetch, jb.BOARDS_SEED, jb.BOARDS_CACHE = original_fetch, original_seed, original_cache
+    assert found == {"known": "AA.001", "nagomisecurity": "89.00B"}, found
+
+
+def test_comeet_candidates_lets_the_archive_win_over_a_stale_seed_uid():
+    """A live crawl result is more current than a seed entry, so it takes priority."""
+    import job_boards as jb
+    rows = [["original"], ["https://www.comeet.com/jobs/acme/AA.999"]]
+    seed_dir = Path(tempfile.mkdtemp())
+    seed_path = seed_dir / "boards.seed.json"
+    seed_path.write_text(json.dumps({
+        "comeet": [{"slug": "acme", "company_uid": "AA.001"}]
+    }))
+    cache_path = seed_dir / "boards.json"
+
+    original_fetch, original_seed, original_cache = jb.fetch, jb.BOARDS_SEED, jb.BOARDS_CACHE
+    jb.fetch = lambda *_a, **_k: json.dumps(rows).encode()
+    jb.BOARDS_SEED, jb.BOARDS_CACHE = seed_path, cache_path
+    try:
+        found = jb.comeet_candidates()
+    finally:
+        jb.fetch, jb.BOARDS_SEED, jb.BOARDS_CACHE = original_fetch, original_seed, original_cache
+    assert found == {"acme": "AA.999"}, found
 
 
 def test_comeet_board_metadata_extracts_the_public_token_from_the_board_page():
@@ -1286,20 +1345,23 @@ def test_comeet_board_without_a_token_is_treated_as_dead():
 
 
 def test_discover_comeet_boards_returns_only_live_boards_with_their_metadata():
-    import job_boards as jb
+    jb, seed_path, cache_path = _no_comeet_seed()
     rows = [["original"],
             ["https://www.comeet.com/jobs/live-z/AA.001"],
             ["https://www.comeet.com/jobs/live-a/aa.001"],
             ["https://www.comeet.com/jobs/dead/BB.002"]]
     original_fetch, original_meta = jb.fetch, jb.comeet_board_metadata
+    original_seed, original_cache = jb.BOARDS_SEED, jb.BOARDS_CACHE
     jb.fetch = lambda *_a, **_k: json.dumps(rows).encode()
     jb.comeet_board_metadata = lambda slug, uid: (
         {"company_uid": uid, "public_token": "TOK"} if slug.startswith("live-") else None
     )
+    jb.BOARDS_SEED, jb.BOARDS_CACHE = seed_path, cache_path
     try:
         found = jb.discover_comeet_boards()
     finally:
         jb.fetch, jb.comeet_board_metadata = original_fetch, original_meta
+        jb.BOARDS_SEED, jb.BOARDS_CACHE = original_seed, original_cache
     assert found == [
         {"slug": "live-a", "company_uid": "AA.001", "public_token": "TOK"}
     ], found
@@ -1364,19 +1426,22 @@ def test_a_dead_comeet_alias_cannot_displace_a_live_one_sharing_its_uid():
     "aaa-dead" sorts first, so deduplicating before resolution would let a board
     with no token represent the UID and silently lose the company entirely.
     """
-    import job_boards as jb
+    jb, seed_path, cache_path = _no_comeet_seed()
     rows = [["original"],
             ["https://www.comeet.com/jobs/aaa-dead/AA.001"],
             ["https://www.comeet.com/jobs/zzz-live/AA.001"]]
     original_fetch, original_meta = jb.fetch, jb.comeet_board_metadata
+    original_seed, original_cache = jb.BOARDS_SEED, jb.BOARDS_CACHE
     jb.fetch = lambda *_a, **_k: json.dumps(rows).encode()
     jb.comeet_board_metadata = lambda slug, uid: (
         None if slug == "aaa-dead" else {"company_uid": uid, "public_token": "TOK"}
     )
+    jb.BOARDS_SEED, jb.BOARDS_CACHE = seed_path, cache_path
     try:
         found = jb.discover_comeet_boards()
     finally:
         jb.fetch, jb.comeet_board_metadata = original_fetch, original_meta
+        jb.BOARDS_SEED, jb.BOARDS_CACHE = original_seed, original_cache
     assert found == [
         {"slug": "zzz-live", "company_uid": "AA.001", "public_token": "TOK"}
     ], found

@@ -64,5 +64,8 @@
     "ro",
     "spotify",
     "voleon"
+  ],
+  "comeet": [
+    {"slug": "NagomiSecurity", "company_uid": "89.00B"}
   ]
 }
