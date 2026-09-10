@@ -145,7 +145,7 @@ def test_comeet_normalization_and_dispatch_boundary_are_offline():
         "id": "position-1", "title": "Developer", "department": "R&D", "team": "",
         "employmentType": "Full-time", "location": "Tel Aviv, Israel", "isRemote": False,
         "workplaceType": "Hybrid", "publishedAt": "2026-06-10T16:03:01Z",
-        "jobUrl": "https://acme.example/careers/position-1", "_description": "",
+        "jobUrl": "https://www.comeet.com/jobs/acme/E4.006/position-1", "_description": "",
     }
     original = jb.fetch
     jb.fetch = lambda *_args, **_kwargs: json.dumps(payload).encode()

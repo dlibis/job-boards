@@ -431,7 +431,7 @@ def normalize_comeet(job: dict) -> dict | None:
         "isRemote": bool(location.get("is_remote")) if isinstance(location, dict) else False,
         "workplaceType": job.get("workplace_type") or "",
         "publishedAt": job.get("time_updated") or "",
-        "jobUrl": job.get("url_active_page") or job.get("url_comeet_hosted_page") or "",
+        "jobUrl": job.get("url_comeet_hosted_page") or job.get("url_active_page") or "",
         "_description": "\n\n".join(d["value"] for d in sections),
     }
 
